@@ -17,6 +17,7 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - `python3 scripts/smoke.py` — synthetic hot-CPI print through the whole pipeline in a throwaway engine container
   (port 8021, mock AI, scratch database `eco_smoke`); production data is never touched
 - `bash scripts/test.sh` — unit + database tests inside the engine container against `eco_tests`
+- `python3 scripts/telegram_setup.py` — connect the bot: discover chat id, write `.env`, restart engine, send a test
 - `python3 scripts/setup.py` — regenerate `.local/import/*` and the committed `n8n/*.json` templates
 - `docker compose logs --tail=100 engine n8n`
 
@@ -26,7 +27,8 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - Never hardcode secrets; `.env` is generated and gitignored. Workflow JSON references credentials by id only.
 - Sources live in `sources/registry.json` (reliability/priority). Add a feed there and rerun `scripts/setup.py`;
   do not hand-edit workflows in the n8n UI — regenerate and re-import.
-- LLM calls never run inside a database transaction (claim → commit → call → write).
+- LLM calls and Telegram sends never run inside a database transaction (claim → commit → call → write).
+- `db/02-schema.sql` must stay idempotent: the engine applies it on every start (that is the migration step).
 - Every AI output is validated against `app/schemas.py`; structured-output schemas come from those models.
 - `US10Y` scores are yield direction (BULLISH = yield up). Scores are -100..100, negative = bearish.
 
@@ -37,3 +39,4 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - macro state: living score per region×dimension (`macro_state`), journaled in `macro_state_history`
 - asset impact: per-event, per-asset, per-horizon score (immediate 0-4h, short 1-5d, medium 2-8w)
 - reaction: what the market actually did at 5m/15m/1h/4h/24h vs the expected direction
+- notification: one outbox row (`notifications`) per Telegram message: brief, event_alert or test

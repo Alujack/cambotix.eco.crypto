@@ -9,19 +9,24 @@ import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from app import ai, briefs, embeddings, intel, pipeline, sources
+from pathlib import Path
+
+from app import ai, briefs, embeddings, intel, pipeline, sources, telegram
 from app.config import ASSET_UNIVERSE, ai_provider, anthropic_configured, env, env_bool
 from app.db import database
 from app.schemas import IngestArticlesRequest, IngestCalendarRequest
 
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s %(name)s %(levelname)s %(message)s')
 log = logging.getLogger('eco')
+SCHEMA = Path(__file__).resolve().parents[1] / 'db' / '02-schema.sql'
 
 
 @asynccontextmanager
 async def lifespan(_app):
     try:
         with database() as conn:
+            # The schema is written to be idempotent, so applying it on every start doubles as the migration step.
+            conn.execute(SCHEMA.read_text())
             count = sources.seed(conn)
         log.info('seeded %s sources; ai=%s (%s); embeddings=%s', count, ai_provider(),
                  'configured' if ai_provider() == 'mock' or anthropic_configured() else 'NOT CONFIGURED', embeddings.provider())
@@ -96,12 +101,39 @@ def process_reactions():
 
 
 @app.post('/briefs/daily', dependencies=[Depends(authorize)])
-def make_daily_brief(brief_date: date | None = None):
+def make_daily_brief(brief_date: date | None = None, notify: bool = True):
     use_ai = env_bool('BRIEF_USE_AI', True) and (ai_provider() == 'mock' or anthropic_configured())
     with database() as conn:
         brief = briefs.build_daily(conn, brief_date, use_ai)
         briefs.store(conn, brief, pipeline._model_label() if use_ai else None)
+        queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", brief['text']) if notify else None
+    brief['telegram'] = telegram.deliver_pending() if queued else {'skipped': 'not configured' if notify else 'notify=false'}
     return brief
+
+
+# ---- notifications (Telegram outbox) -----------------------------------------------------------------------------
+@app.post('/notify/flush', dependencies=[Depends(authorize)])
+def notify_flush():
+    if not telegram.configured():
+        return {'skipped': 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set'}
+    return telegram.deliver_pending()
+
+
+@app.post('/notify/test', dependencies=[Depends(authorize)])
+def notify_test():
+    if not telegram.configured():
+        raise HTTPException(503, 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set')
+    stamp = f'{__import__("datetime").datetime.now(__import__("datetime").timezone.utc):%Y-%m-%d %H:%M:%S} UTC'
+    with database() as conn:
+        telegram.enqueue(conn, 'test', stamp, '✅ Cambotix Economic Intelligence Engine connected.\n'
+                         'Daily macro brief arrives at 06:00 UTC; high-impact event alerts as they are analyzed.\n' + stamp)
+    return telegram.deliver_pending()
+
+
+@app.get('/notify/status', dependencies=[Depends(authorize)])
+def notify_status():
+    with database() as conn:
+        return telegram.status(conn)
 
 
 # ---- intelligence API (consumed by the gold / forex / crypto engines later) --------------------------------------

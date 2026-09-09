@@ -225,7 +225,8 @@ def build_workflows(registry: dict) -> list[dict]:
             ('eco08Extract', 'Eco 08 — Extract facts + cluster events', schedule(seconds=30), '/process/extract', 240000),
             ('eco09Analyze', 'Eco 09 — Economic analyst', schedule(seconds=60), '/process/analyze', 400000),
             ('eco10Reactions', 'Eco 10 — Market reaction tracker', schedule(minutes=5), '/process/reactions', 60000),
-            ('eco11DailyBrief', 'Eco 11 — Daily macro brief', schedule(cron='0 6 * * *'), '/briefs/daily', 400000)):
+            ('eco11DailyBrief', 'Eco 11 — Daily macro brief', schedule(cron='0 6 * * *'), '/briefs/daily', 400000),
+            ('eco12TelegramOutbox', 'Eco 12 — Telegram outbox', schedule(seconds=60), '/notify/flush', 60000)):
         nodes = [trig, engine_post('Call engine ' + path, path, 280, timeout=timeout)]
         workflows.append(workflow(identifier, name, nodes, chain(nodes)))
     return workflows

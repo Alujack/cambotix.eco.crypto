@@ -15,7 +15,7 @@ def client():
     from app.main import app
     with database() as conn:
         for table in ('market_reactions', 'asset_impacts', 'event_analysis', 'macro_state_history', 'event_articles',
-                      'knowledge_embeddings', 'briefs', 'economic_releases'):
+                      'knowledge_embeddings', 'briefs', 'economic_releases', 'notifications'):
             conn.execute(f'DELETE FROM {table}')
         conn.execute("UPDATE macro_state SET score = 0, state = 'UNKNOWN', trend = 'STABLE', confidence = 0, last_event_id = NULL")
         conn.execute('UPDATE raw_articles SET event_id = NULL')
@@ -88,3 +88,27 @@ def test_calendar_print_spawns_release_article(client):
     assert result['extracted'] == 1
     events = client.get('/events/recent?hours=1', headers=HEADERS).json()
     assert events[0]['event_type'] == 'CPI_RELEASE' and events[0]['facts']['actual'] == 3.1
+
+
+def test_outbox_delivers_and_retries(client, monkeypatch):
+    from app import telegram
+    from app.db import database
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'x')
+    monkeypatch.setenv('TELEGRAM_CHAT_ID', '1')
+    with database() as conn:
+        telegram.enqueue(conn, 'test', 'a', 'hello')
+        telegram.enqueue(conn, 'test', 'b', 'world')
+    calls = []
+
+    def flaky(text, parse_mode=None):
+        calls.append(text)
+        if text == 'world':
+            raise telegram.TelegramError('rate limited by Telegram')
+    result = telegram.deliver_pending(sender=flaky)
+    assert result == {'claimed': 2, 'sent': 1, 'failed': 1} and calls == ['hello', 'world']
+    status = client.get('/notify/status', headers=HEADERS).json()
+    assert status['sent'] == 1 and status['pending'] == 1
+    with database() as conn:
+        conn.execute("UPDATE notifications SET next_attempt_at = now() WHERE status = 'pending'")
+    assert telegram.deliver_pending(sender=lambda t, p=None: None)['sent'] == 1
+    assert client.get('/notify/status', headers=HEADERS).json()['pending'] == 0

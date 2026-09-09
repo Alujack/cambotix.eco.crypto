@@ -29,6 +29,12 @@ def main():
           f"  extract={ai['extractModel']}  analyst={ai['analystModel']}")
     print(f"Embeddings    {health['embeddings']['provider']}  {health['embeddings']['model'] or ''}")
     print(f"n8n editor    http://localhost:{env.get('N8N_PORT', '5681')}")
+    tg = get(base, env['ENGINE_TOKEN'], '/notify/status')
+    if tg['configured']:
+        print(f"Telegram      chat {tg['chatId']}  sent={tg['sent']} pending={tg['pending']} failed={tg['failed']}"
+              f"  last={tg['lastKind'] or '-'} {tg['lastSent'] or ''}")
+    else:
+        print('Telegram      not connected (python3 scripts/telegram_setup.py)')
     sources = get(base, env['ENGINE_TOKEN'], '/sources')
     active = [s for s in sources if s['articles']]
     print(f"Sources       {len(sources)} registered, {len(active)} delivering, "

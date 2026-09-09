@@ -1,0 +1,71 @@
+{
+  "id": "eco12TelegramOutbox",
+  "name": "Eco 12 \u2014 Telegram outbox",
+  "active": false,
+  "nodes": [
+    {
+      "id": "every-60-seconds",
+      "name": "Every 60 seconds",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 60
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "call-engine--notify-flush",
+      "name": "Call engine /notify/flush",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://engine:8000/notify/flush",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ecoEngineAuth",
+          "name": "Eco engine internal API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 60 seconds": {
+      "main": [
+        [
+          {
+            "node": "Call engine /notify/flush",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "tags": []
+}

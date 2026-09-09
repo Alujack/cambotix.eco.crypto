@@ -217,6 +217,24 @@ CREATE TABLE IF NOT EXISTS briefs (
     UNIQUE (kind, brief_date)
 );
 
+-- Notification outbox (Telegram). Enqueued by the engine, flushed immediately and retried by n8n workflow 12.
+CREATE TABLE IF NOT EXISTS notifications (
+    id bigserial PRIMARY KEY,
+    channel text NOT NULL DEFAULT 'telegram',
+    kind text NOT NULL CHECK (kind IN ('brief', 'event_alert', 'test')),
+    ref_id text NOT NULL,
+    text text NOT NULL,
+    parse_mode text,
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+    attempts integer NOT NULL DEFAULT 0,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    error text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    sent_at timestamptz,
+    UNIQUE (kind, ref_id)
+);
+CREATE INDEX IF NOT EXISTS notifications_pending_idx ON notifications (next_attempt_at) WHERE status = 'pending';
+
 -- pgvector memory. Dimension is left open so the embedding provider can change; always filter by model.
 CREATE TABLE IF NOT EXISTS knowledge_embeddings (
     id bigserial PRIMARY KEY,

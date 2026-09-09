@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
-from app import ai, clustering, embeddings, macro_state, reactions
+from app import ai, clustering, embeddings, macro_state, reactions, telegram
 from app.config import MEDIA_SOURCE_CATEGORIES, env_int
 from app.db import database
 from app.normalize import article_id, classify, clean_text, content_hash, parse_datetime
@@ -381,8 +381,19 @@ def run_analyze(force: bool = False) -> dict:
                 vector = embeddings.to_pgvector(vectors[0])
                 embeddings.store(conn, 'event', event['id'], f"{event['title']}\n{analysis.summary}", vector, event['id'])
                 embeddings.store(conn, 'analysis', str(analysis_id), analysis.summary, vector, event['id'])
+    alert = None
+    if version == 1 and telegram.configured() and event['importance'] >= env_int('TELEGRAM_ALERT_MIN_IMPORTANCE', 80):
+        try:
+            with database() as conn:
+                telegram.enqueue(conn, 'event_alert', event['id'],
+                                 telegram.format_event_alert(event, analysis, event['article_count']), 'HTML')
+            alert = telegram.deliver_pending()
+        except Exception as error:  # delivery must never undo a stored analysis
+            log.warning('alert for %s not delivered: %s', event['id'], error)
+            alert = {'error': str(error)[:200]}
     return {'analyzed': 1, 'eventId': event['id'], 'version': version, 'summary': analysis.summary,
-            'assetImpacts': len(analysis.asset_impacts), 'macroStateChanges': changes, 'reactionWindows': opened}
+            'assetImpacts': len(analysis.asset_impacts), 'macroStateChanges': changes, 'reactionWindows': opened,
+            'alert': alert}
 
 
 def _model_label() -> str:

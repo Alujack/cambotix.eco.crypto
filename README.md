@@ -28,7 +28,7 @@ Requires Docker with Compose and Python 3.12+ on the host (no host packages are 
 bash scripts/start.sh
 ```
 
-This generates `.env` secrets, starts Postgres (pgvector), n8n and the engine, imports and publishes the eleven n8n
+This generates `.env` secrets, starts Postgres (pgvector), n8n and the engine, imports and publishes the twelve n8n
 workflows, and prints a status view. Open **http://localhost:5681** and create the local n8n owner account — the
 workflows are already active. Existing n8n installs on 5678/5679/5680 are unaffected.
 
@@ -86,14 +86,30 @@ next start. Back up `.env` with the volumes — the encryption key is needed to 
 7. **Market reactions** — when an analysis lands, BTC/ETH prices are anchored (CoinGecko; Gold/EURUSD via Alpha
    Vantage when `REACTIONS_FX_ENABLED=true`) and measured at 5m/15m/1h/4h/24h against the expected direction:
    `CONFIRMED / REJECTED / FLAT`.
-8. **Briefs** — `POST /briefs/daily` (06:00 UTC by workflow 11) renders the macro regime, high-impact releases,
-   developments, asset pressure and risks; the narrative paragraph is model-written when a key is configured.
+8. **Briefs + delivery** — `POST /briefs/daily` (06:00 UTC by workflow 11) renders the macro regime, high-impact
+   releases, developments, asset pressure and risks; the narrative paragraph is model-written when a key is configured.
+   Briefs and high-importance alerts are delivered to Telegram through the `notifications` outbox (workflow 12 retries).
 
 ### Asset universe and scoring
 
 `USD EURUSD XAUUSD BTC ETH SPX NASDAQ US10Y OIL`. Scores run -100..100, negative = bearish. **`US10Y` is the yield**:
 BULLISH means the yield rises. Horizons: immediate 0–4 h, short 1–5 trading days, medium 2–8 weeks. `/macro/current`
 blends impacts with exponential decay (half-lives 12 h / 3 d / 14 d) and damps thin evidence.
+
+## Telegram delivery
+
+Create a bot with @BotFather, put its token in `.env` as `TELEGRAM_BOT_TOKEN`, send the bot `/start` (or add it to a
+group or channel as admin), then:
+
+```bash
+python3 scripts/telegram_setup.py        # discovers the chat id, writes TELEGRAM_CHAT_ID, restarts the engine, sends a test
+```
+
+What arrives: the **daily macro brief** at 06:00 UTC (workflow 11) and an **alert for every event whose first analysis
+lands with importance ≥ `TELEGRAM_ALERT_MIN_IMPORTANCE`** (default 80: FOMC/ECB decisions, CPI, NFP, PCE, major
+regulation or exchange failures). Messages go through the `notifications` outbox: the engine sends immediately and
+workflow **Eco 12** retries anything pending every minute (`POST /notify/flush`). `GET /notify/status` and
+`scripts/status.py` show sent/pending/failed counts; `POST /briefs/daily` re-sends today's brief.
 
 ## Intelligence API
 
@@ -109,6 +125,7 @@ All routes except `/health` need the header `X-Eco-Token: <ENGINE_TOKEN>` (from 
 | `GET /analysis/{asset}` | Decay-weighted bias, contributing events with rationale, reaction scorecard |
 | `GET /briefs/latest?format=text` | Newest daily brief |
 | `GET /sources` | Registry with article counts |
+| `GET /notify/status`, `POST /notify/flush`, `POST /notify/test` | Telegram outbox |
 | `POST /ingest/articles`, `/ingest/calendar` | Called by n8n collectors |
 | `POST /process/extract?batch=5`, `/process/analyze?force=false`, `/process/reactions`, `/briefs/daily` | Called by n8n schedulers; `force=true` skips the coverage debounce for a manual run |
 
@@ -120,7 +137,7 @@ app/            FastAPI engine: pipeline.py (write path), intel.py (read models)
 db/             01-databases.sql (n8n db), 02-schema.sql (engine schema + seeds)
 sources/        registry.json — the source registry (reliability, priority, workflow group)
 n8n/            generated workflow templates (eco01…eco11), committed for review
-scripts/        setup.py · start.sh · status.py · smoke.py · test.sh
+scripts/        setup.py · start.sh · status.py · smoke.py · test.sh · telegram_setup.py
 tests/          unit tests (run anywhere) + database tests (scripts/test.sh)
 docs/           architecture.md — design notes, data model, roadmap
 ```

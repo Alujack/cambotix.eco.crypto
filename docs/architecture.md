@@ -23,7 +23,9 @@ the model's job, in two stages so the expensive model only ever sees clustered e
 | Macro-state update | `app/macro_state.apply_updates` | inside analyze, same transaction |
 | Reaction anchors | `app/reactions.open_windows` | inside analyze (first version only) |
 | Reaction measurement | `app/reactions.measure_due` | n8n `eco10` every 5 min |
-| Daily brief | `app/briefs.build_daily` | n8n `eco11` 06:00 UTC |
+| Daily brief | `app/briefs.build_daily` → Telegram outbox | n8n `eco11` 06:00 UTC |
+| Event alerts | `app/telegram.format_event_alert` on first analysis, importance ≥ 80 | inside analyze |
+| Outbox flush | `app/telegram.deliver_pending` | n8n `eco12` every 60 s |
 
 Queue semantics: `raw_articles.status` (`queued → extracting → extracted | ignored | error`) and
 `economic_events.needs_analysis` with `FOR UPDATE SKIP LOCKED` claims, so several n8n ticks can overlap safely.
@@ -42,7 +44,7 @@ sources ──< raw_articles >── event_articles >── economic_events ─�
                                                       ├──< market_reactions│
                                                       ├──< economic_releases (calendar, linked when analyzed)
                                                       └──< knowledge_embeddings (pgvector; kind = article|event|analysis)
-macro_state (region × dimension) ──< macro_state_history      economic_asset_map (priors)      briefs
+macro_state (region × dimension) ──< macro_state_history      economic_asset_map (priors)      briefs      notifications (outbox)
 ```
 
 Regions × dimensions: US (inflation, employment, growth, monetary_policy, liquidity, fiscal), EU (inflation, growth,
