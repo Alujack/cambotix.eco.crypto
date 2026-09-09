@@ -1,0 +1,37 @@
+{
+  "_comment": "Source registry. Reliability drives dedupe precedence, macro-state weighting and analyst trust; priority drives importance priors. Poll cadence lives in scripts/setup.py (workflow schedules).",
+  "sources": [
+    {"key": "fed_press_monetary", "name": "Federal Reserve — monetary policy press releases", "category": "central_bank", "country": "US", "type": "rss", "url": "https://www.federalreserve.gov/feeds/press_monetary.xml", "priority": 100, "reliability": 100, "default_categories": ["MONETARY_POLICY"], "workflow": "central_banks"},
+    {"key": "fed_press_all", "name": "Federal Reserve — all press releases", "category": "central_bank", "country": "US", "type": "rss", "url": "https://www.federalreserve.gov/feeds/press_all.xml", "priority": 90, "reliability": 100, "default_categories": ["MONETARY_POLICY"], "workflow": "central_banks"},
+    {"key": "fed_speeches", "name": "Federal Reserve — speeches", "category": "central_bank", "country": "US", "type": "rss", "url": "https://www.federalreserve.gov/feeds/speeches.xml", "priority": 90, "reliability": 100, "default_categories": ["MONETARY_POLICY"], "workflow": "central_banks"},
+    {"key": "ecb_press", "name": "European Central Bank — press releases", "category": "central_bank", "country": "EU", "type": "rss", "url": "https://www.ecb.europa.eu/rss/press.html", "priority": 85, "reliability": 100, "default_categories": ["MONETARY_POLICY"], "workflow": "central_banks"},
+    {"key": "ecb_speeches", "name": "European Central Bank — speeches", "category": "central_bank", "country": "EU", "type": "rss", "url": "https://www.ecb.europa.eu/rss/speeches.html", "priority": 75, "reliability": 100, "default_categories": ["MONETARY_POLICY"], "workflow": "central_banks"},
+
+    {"key": "bls_latest", "name": "Bureau of Labor Statistics — latest releases", "category": "official_statistics", "country": "US", "type": "rss", "url": "https://www.bls.gov/feed/bls_latest.rss", "priority": 95, "reliability": 100, "default_categories": ["EMPLOYMENT", "INFLATION"], "workflow": "official_data"},
+    {"key": "bls_cpi", "name": "Bureau of Labor Statistics — CPI", "category": "official_statistics", "country": "US", "type": "rss", "url": "https://www.bls.gov/feed/cpi.rss", "priority": 100, "reliability": 100, "default_categories": ["INFLATION"], "workflow": "official_data"},
+    {"key": "bls_empsit", "name": "Bureau of Labor Statistics — Employment Situation", "category": "official_statistics", "country": "US", "type": "rss", "url": "https://www.bls.gov/feed/empsit.rss", "priority": 100, "reliability": 100, "default_categories": ["EMPLOYMENT"], "workflow": "official_data"},
+    {"key": "bea_news", "name": "Bureau of Economic Analysis — news releases", "category": "official_statistics", "country": "US", "type": "rss", "url": "https://apps.bea.gov/rss/rss.xml", "priority": 95, "reliability": 100, "default_categories": ["GROWTH", "INFLATION"], "workflow": "official_data"},
+
+    {"key": "sec_press", "name": "SEC — press releases", "category": "regulator", "country": "US", "type": "rss", "url": "https://www.sec.gov/news/pressreleases.rss", "priority": 80, "reliability": 100, "default_categories": ["CRYPTO"], "workflow": "regulators"},
+    {"key": "cftc_press", "name": "CFTC — press releases", "category": "regulator", "country": "US", "type": "rss", "url": "https://www.cftc.gov/RSS/RSSGP/rssgp.xml", "priority": 70, "reliability": 100, "default_categories": ["CRYPTO"], "workflow": "regulators"},
+
+    {"key": "cnbc_economy", "name": "CNBC — Economy", "category": "financial_media", "country": "US", "type": "rss", "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html", "priority": 60, "reliability": 80, "default_categories": [], "workflow": "financial_news"},
+    {"key": "marketwatch_top", "name": "MarketWatch — top stories", "category": "financial_media", "country": "US", "type": "rss", "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories", "priority": 55, "reliability": 75, "default_categories": [], "workflow": "financial_news"},
+    {"key": "forexlive_news", "name": "ForexLive — news", "category": "financial_media", "country": "GLOBAL", "type": "rss", "url": "https://www.forexlive.com/feed/news", "priority": 55, "reliability": 65, "default_categories": [], "workflow": "financial_news"},
+    {"key": "alphavantage_news", "name": "Alpha Vantage — NEWS_SENTIMENT aggregate", "category": "financial_media", "country": "GLOBAL", "type": "api", "url": "https://www.alphavantage.co/query", "priority": 55, "reliability": 70, "default_categories": [], "workflow": "alphavantage"},
+
+    {"key": "coindesk", "name": "CoinDesk", "category": "crypto_media", "country": "GLOBAL", "type": "rss", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "priority": 55, "reliability": 65, "default_categories": ["CRYPTO"], "workflow": "crypto_news"},
+    {"key": "theblock", "name": "The Block", "category": "crypto_media", "country": "GLOBAL", "type": "rss", "url": "https://www.theblock.co/rss.xml", "priority": 55, "reliability": 65, "default_categories": ["CRYPTO"], "workflow": "crypto_news"},
+    {"key": "cointelegraph", "name": "Cointelegraph", "category": "crypto_media", "country": "GLOBAL", "type": "rss", "url": "https://cointelegraph.com/rss", "priority": 45, "reliability": 60, "default_categories": ["CRYPTO"], "workflow": "crypto_news"},
+    {"key": "decrypt", "name": "Decrypt", "category": "crypto_media", "country": "GLOBAL", "type": "rss", "url": "https://decrypt.co/feed", "priority": 40, "reliability": 55, "default_categories": ["CRYPTO"], "workflow": "crypto_news"},
+
+    {"key": "forexfactory_calendar", "name": "ForexFactory — weekly economic calendar", "category": "calendar", "country": "GLOBAL", "type": "api", "url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json", "priority": 90, "reliability": 70, "default_categories": [], "workflow": "calendar"},
+    {"key": "release_print", "name": "Calendar print (synthetic actual-vs-forecast article)", "category": "calendar", "country": "GLOBAL", "type": "synthetic", "url": null, "priority": 95, "reliability": 70, "default_categories": [], "workflow": null},
+    {"key": "coingecko", "name": "CoinGecko — spot prices", "category": "market_data", "country": "GLOBAL", "type": "api", "url": "https://api.coingecko.com/api/v3", "priority": 50, "reliability": 90, "default_categories": [], "workflow": null}
+  ],
+  "publisher_reliability": {
+    "Reuters": 95, "Bloomberg": 95, "Financial Times": 90, "The Wall Street Journal": 90, "WSJ": 90,
+    "CNBC": 80, "Barron's": 80, "MarketWatch": 75, "Yahoo Finance": 65, "Benzinga": 55, "Motley Fool": 45,
+    "Zacks Commentary": 45, "Cointelegraph": 60, "CoinDesk": 65, "Decrypt": 55
+  }
+}

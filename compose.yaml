@@ -1,0 +1,82 @@
+name: cambotix-eco-crypto
+services:
+  postgres:
+    # pgvector ships the `vector` extension the knowledge store needs; plain postgres does not.
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: eco
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/setup.py}
+      POSTGRES_DB: eco
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/01-databases.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro
+      - ./db/02-schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U eco -d eco']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.26.9
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:${N8N_PORT:-5681}:5678'
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: eco
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Run scripts/setup.py}
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_EDITOR_BASE_URL: http://localhost:${N8N_PORT:-5681}
+      WEBHOOK_URL: http://localhost:${N8N_PORT:-5681}/
+      # Economic data is UTC end to end (release times, reaction windows, briefs).
+      GENERIC_TIMEZONE: UTC
+      TZ: UTC
+      N8N_SECURE_COOKIE: 'false'
+      N8N_DIAGNOSTICS_ENABLED: 'false'
+      N8N_PERSONALIZATION_ENABLED: 'false'
+      N8N_VERSION_NOTIFICATIONS_ENABLED: 'false'
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_PRUNE: 'true'
+      EXECUTIONS_DATA_MAX_AGE: 168
+      # The Alpha Vantage collector reads $env.ALPHA_VANTAGE_API_KEY; n8n denies $env by default.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: 'false'
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./.local/import:/imports:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, 'fetch("http://127.0.0.1:5678/healthz").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  engine:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_NAME: eco
+      DB_USER: eco
+    ports:
+      - '127.0.0.1:${ENGINE_PORT:-8020}:8000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://localhost:8000/health")']
+      interval: 10s
+      timeout: 3s
+      retries: 20
+volumes:
+  postgres_data:
+  n8n_data:
