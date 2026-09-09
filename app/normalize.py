@@ -135,6 +135,45 @@ def classify(headline: str, content: str, source: dict, topics: list[str] | None
             'importance_prior': int(max(0, min(100, round(prior))))}
 
 
+COUNTRY_ALIASES = {
+    'UNITED STATES': 'US', 'UNITED STATES OF AMERICA': 'US', 'USA': 'US', 'U.S.': 'US', 'U.S.A.': 'US', 'AMERICA': 'US',
+    'EURO AREA': 'EU', 'EUROZONE': 'EU', 'EURO ZONE': 'EU', 'EUROPEAN UNION': 'EU', 'EUROPE': 'EU',
+    'UNITED KINGDOM': 'GB', 'UK': 'GB', 'U.K.': 'GB', 'BRITAIN': 'GB', 'GREAT BRITAIN': 'GB', 'ENGLAND': 'GB',
+    'CANADA': 'CA', 'JAPAN': 'JP', 'CHINA': 'CN', "PEOPLE'S REPUBLIC OF CHINA": 'CN', 'GERMANY': 'DE', 'FRANCE': 'FR',
+    'ITALY': 'IT', 'SPAIN': 'ES', 'NETHERLANDS': 'NL', 'SWITZERLAND': 'CH', 'AUSTRALIA': 'AU', 'NEW ZEALAND': 'NZ',
+    'MEXICO': 'MX', 'BRAZIL': 'BR', 'INDIA': 'IN', 'RUSSIA': 'RU', 'RUSSIAN FEDERATION': 'RU', 'UKRAINE': 'UA',
+    'IRAN': 'IR', 'ISRAEL': 'IL', 'SAUDI ARABIA': 'SA', 'TURKEY': 'TR', 'TURKIYE': 'TR', 'SOUTH KOREA': 'KR',
+    'KOREA': 'KR', 'NORTH KOREA': 'KP', 'TAIWAN': 'TW', 'HONG KONG': 'HK', 'SINGAPORE': 'SG', 'SOUTH AFRICA': 'ZA',
+    'NIGERIA': 'NG', 'EGYPT': 'EG', 'ARGENTINA': 'AR', 'CHILE': 'CL', 'COLOMBIA': 'CO', 'VENEZUELA': 'VE',
+    'INDONESIA': 'ID', 'MALAYSIA': 'MY', 'THAILAND': 'TH', 'VIETNAM': 'VN', 'PHILIPPINES': 'PH', 'CAMBODIA': 'KH',
+    'SWEDEN': 'SE', 'NORWAY': 'NO', 'DENMARK': 'DK', 'FINLAND': 'FI', 'POLAND': 'PL', 'IRELAND': 'IE',
+    'AUSTRIA': 'AT', 'BELGIUM': 'BE', 'PORTUGAL': 'PT', 'GREECE': 'GR', 'CZECH REPUBLIC': 'CZ', 'HUNGARY': 'HU',
+    'WORLD': 'GLOBAL', 'WORLDWIDE': 'GLOBAL', 'INTERNATIONAL': 'GLOBAL', 'EMERGING MARKETS': 'GLOBAL',
+    'MIDDLE EAST': 'GLOBAL', 'ASIA': 'GLOBAL', 'G7': 'GLOBAL', 'G20': 'GLOBAL', 'OPEC': 'GLOBAL',
+}
+# Currency codes the calendar uses, mapped to the country whose data it is.
+CURRENCY_COUNTRIES = {'USD': 'US', 'EUR': 'EU', 'GBP': 'GB', 'JPY': 'JP', 'CNY': 'CN', 'CAD': 'CA', 'AUD': 'AU',
+                      'NZD': 'NZ', 'CHF': 'CH', 'SEK': 'SE', 'NOK': 'NO', 'MXN': 'MX', 'BRL': 'BR', 'INR': 'IN',
+                      'KRW': 'KR', 'TRY': 'TR', 'ZAR': 'ZA', 'SGD': 'SG', 'HKD': 'HK', 'RUB': 'RU'}
+
+
+def normalize_countries(values) -> list[str]:
+    """ISO-2 (plus EU / GLOBAL), de-duplicated, order preserved. Models write 'Canada' or 'United States' as often as
+    the code, and clustering keys and array matching depend on one spelling."""
+    out = []
+    for value in values or []:
+        code = str(value).strip().upper().replace('.', '').strip()
+        if not code:
+            continue
+        code = COUNTRY_ALIASES.get(code) or COUNTRY_ALIASES.get(code.replace('  ', ' ')) or code
+        if len(code) > 2 and code != 'GLOBAL':
+            # Unknown long form: keep the first token only if it is already a code, else drop to GLOBAL.
+            code = code if len(code) == 2 else 'GLOBAL'
+        if code not in out:
+            out.append(code)
+    return out
+
+
 ALPHA_VANTAGE_TOPICS = {
     'economy_macro': 'GROWTH', 'economy_monetary': 'MONETARY_POLICY', 'economy_fiscal': 'GLOBAL_GEOPOLITICAL',
     'blockchain': 'CRYPTO', 'financial_markets': 'GROWTH',

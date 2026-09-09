@@ -17,9 +17,9 @@ the model's job, in two stages so the expensive model only ever sees clustered e
 | Collect RSS / API | n8n `eco01`–`eco06` | every 5–60 min |
 | Calendar | n8n `eco07` → `POST /ingest/calendar` | hourly; a HIGH-impact print spawns a synthetic `release_print` article |
 | Normalize, hash, dedupe, priors | `app/pipeline.ingest_articles` | on POST |
-| Extract facts | `app/pipeline.run_extract` (`ai.extract`, Haiku) | n8n `eco08` every 30 s, batch 5 |
+| Extract facts | `app/pipeline.run_extract` (`ai.extract`) | n8n `eco08` every 30 s, batch 3 |
 | Cluster into events | `app/clustering.find_event` | inside extract |
-| Analyze | `app/pipeline.run_analyze` (`ai.analyze`, Opus, adaptive thinking) | n8n `eco09` every 60 s, one event per tick |
+| Analyze | `app/pipeline.run_analyze` (`ai.analyze`) + `consistency.check` | n8n `eco09` every 60 s, one event per tick |
 | Macro-state update | `app/macro_state.apply_updates` | inside analyze, same transaction |
 | Reaction anchors | `app/reactions.open_windows` | inside analyze (first version only) |
 | Reaction measurement | `app/reactions.measure_due` | n8n `eco10` every 5 min |
@@ -63,6 +63,24 @@ Official (Fed, ECB, BLS, BEA, SEC, CFTC) 100 · Reuters/Bloomberg 95 · WSJ/FT 9
 Alpha Vantage aggregate 70 (publisher overrides) · ForexFactory calendar 70 · CoinDesk/The Block/ForexLive 65 ·
 Cointelegraph 60 · Decrypt 55. Reliability decides which article's facts win inside an event and scales the macro-state
 weight; it is not a truth score.
+
+## AI providers
+
+`AI_PROVIDER` selects the backend and `app/config.model_for` resolves the model per stage, ignoring a value left over
+from another provider. `ollama` posts to `/api/chat` with `format` set to the Pydantic schema (grammar-constrained
+decoding, `temperature 0`), which needs `$defs` inlined first; `anthropic` uses structured outputs plus adaptive
+thinking and server-side refusal fallbacks. Adding a provider means one `_call_*` function and a branch in
+`ai.extract` / `ai.analyze` / `ai.narrate_brief` — nothing downstream knows which model ran, beyond the `model`
+column on `event_analysis`.
+
+Because model strength varies, `app/consistency.py` records where an analysis disagrees with itself instead of
+trusting or rewriting it: sign against the stated risk regime, zero scores under a directional rationale, one
+rationale copied across assets, a summary that restates the event. Flags are stored on the analysis and aggregated by
+`GET /analysis-quality`, which is the measurement to consult before trusting a local model's scores.
+
+Local inference is serial, so a batch can outlast its schedule tick. The two inference endpoints hold a non-blocking
+lock and report `skipped: busy`; interrupted claims (`extracting` / `analyzing`) are swept back to the queue after
+20 and 30 minutes respectively.
 
 ## Adding a source
 

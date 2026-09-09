@@ -238,14 +238,19 @@ def main():
         content = (ROOT / '.env.example').read_text()
         for key in ('POSTGRES_PASSWORD', 'N8N_ENCRYPTION_KEY', 'ENGINE_TOKEN'):
             content = content.replace(f'{key}=GENERATE', f'{key}={secrets.token_hex(32)}')
+        if sys.platform == 'darwin':
+            # Metal-accelerated native Ollama on the host; the engine container reaches it through host.docker.internal.
+            content = content.replace('OLLAMA_RUNTIME=docker', 'OLLAMA_RUNTIME=native')
+            content = content.replace('COMPOSE_PROFILES=docker-ai', 'COMPOSE_PROFILES=')
+            content = content.replace('OLLAMA_BASE_URL=http://ollama:11434', 'OLLAMA_BASE_URL=http://host.docker.internal:11436')
         write(env_path, content)
     env_path.chmod(0o600)
     env = read_env()
     if any(not env.get(key) or env[key] == 'GENERATE' for key in ('POSTGRES_PASSWORD', 'N8N_ENCRYPTION_KEY', 'ENGINE_TOKEN')):
         raise SystemExit('Fill the required secrets in .env; an existing .env is never overwritten.')
-    if env.get('AI_PROVIDER', 'anthropic') == 'anthropic' and not (env.get('ANTHROPIC_API_KEY') or env.get('ANTHROPIC_AUTH_TOKEN')):
+    if env.get('AI_PROVIDER', 'ollama') == 'anthropic' and not (env.get('ANTHROPIC_API_KEY') or env.get('ANTHROPIC_AUTH_TOKEN')):
         print('Note: ANTHROPIC_API_KEY is empty. Collection works; extraction/analysis return 503 until it is set '
-              '(or AI_PROVIDER=mock).', file=sys.stderr)
+              '(or AI_PROVIDER=ollama / mock).', file=sys.stderr)
     registry = json.loads((ROOT / 'sources' / 'registry.json').read_text())
     workflows = build_workflows(registry)
     local = ROOT / '.local'

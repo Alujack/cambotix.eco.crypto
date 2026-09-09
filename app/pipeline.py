@@ -6,10 +6,11 @@ from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
-from app import ai, clustering, embeddings, macro_state, reactions, telegram
+from app import ai, clustering, consistency, embeddings, macro_state, reactions, telegram
 from app.config import MEDIA_SOURCE_CATEGORIES, env_int
 from app.db import database
-from app.normalize import article_id, classify, clean_text, content_hash, parse_datetime
+from app.normalize import (CURRENCY_COUNTRIES, article_id, classify, clean_text, content_hash, normalize_countries,
+                            parse_datetime)
 from app.schemas import Extraction, IngestArticlesRequest, IngestCalendarRequest
 from app.sources import publisher_reliability
 
@@ -102,7 +103,7 @@ def _synthesize_print(conn, currency: str, item, scheduled: datetime, actual: st
     tags = classify(headline, '', source)
     tags['importance_prior'] = max(tags['importance_prior'], 80)
     if currency not in tags['countries']:
-        tags['countries'] = [{'USD': 'US', 'EUR': 'EU', 'GBP': 'GB', 'JPY': 'JP', 'CNY': 'CN'}.get(currency, currency)]
+        tags['countries'] = [CURRENCY_COUNTRIES.get(currency, 'GLOBAL')]
     inserted = conn.execute('''
         INSERT INTO raw_articles (id, content_hash, source_key, reliability, published_at, headline, content, countries,
                                   categories, entities, assets, importance_prior, status)
@@ -117,14 +118,17 @@ def _synthesize_print(conn, currency: str, item, scheduled: datetime, actual: st
 # ---- stage 1: extract + cluster ---------------------------------------------------------------------------------
 def claim_articles(batch: int) -> list[dict]:
     with database() as conn:
+        # A batch interrupted by a restart leaves rows in 'extracting'; hand them back after 20 minutes.
+        conn.execute('''UPDATE raw_articles SET status = 'queued' WHERE status = 'extracting'
+                        AND next_attempt_at < now() - interval '20 minutes' ''')
         rows = conn.execute('''
             SELECT a.*, s.name AS source_name, s.category AS source_category FROM raw_articles a
             JOIN sources s ON s.key = a.source_key
             WHERE a.status = 'queued' AND a.next_attempt_at <= now()
             ORDER BY a.importance_prior DESC, a.received_at LIMIT %s FOR UPDATE OF a SKIP LOCKED''', (batch,)).fetchall()
         if rows:
-            conn.execute("UPDATE raw_articles SET status = 'extracting', attempts = attempts + 1 WHERE id = ANY(%s)",
-                         ([row['id'] for row in rows],))
+            conn.execute('''UPDATE raw_articles SET status = 'extracting', attempts = attempts + 1, next_attempt_at = now()
+                            WHERE id = ANY(%s)''', ([row['id'] for row in rows],))
         return rows
 
 
@@ -155,6 +159,8 @@ def run_extract(batch: int | None = None) -> dict:
             _finish_article(row['id'], 'ignored', extraction)
             counts['ignored'] += 1
             continue
+        # Models write country names as readily as codes; clustering keys and array matching need one spelling.
+        extraction.countries = normalize_countries(extraction.countries) or ['GLOBAL']
         vector = None
         if embeddings.enabled():
             vectors = embeddings.embed([f"{row['headline']}\n{extraction.fact_summary}"])
@@ -209,7 +215,7 @@ def attach_to_event(row: dict, extraction: Extraction, vector: str | None) -> bo
                             ON CONFLICT (event_key) DO NOTHING''',
                          (event_id, key, extraction.event_type, clustering.event_title(extraction, row['headline']),
                           extraction.subject[:200], _safe_date(extraction.event_date, row['published_at']),
-                          [c.upper() for c in extraction.countries] or ['GLOBAL'], list(extraction.categories), importance,
+                          extraction.countries, list(extraction.categories), importance,
                           row['source_key'], row['id'], row['published_at'], row['published_at'],
                           Jsonb(_facts_from(extraction, row)), list(extraction.assets)))
             created = True
@@ -236,7 +242,7 @@ def attach_to_event(row: dict, extraction: Extraction, vector: str | None) -> bo
                             needs_analysis = needs_analysis OR %s, status = CASE WHEN %s THEN 'open' ELSE status END
                         WHERE id = %s''',
                      (row['published_at'], new_importance, Jsonb(facts), list(extraction.assets),
-                      [c.upper() for c in extraction.countries], list(extraction.categories), primary_article_id,
+                      extraction.countries, list(extraction.categories), primary_article_id,
                       primary_source, informative, informative and event['status'] == 'analyzed', event_id))
         conn.execute('''UPDATE raw_articles SET status = 'extracted', extraction = %s, event_id = %s, error_code = NULL
                         WHERE id = %s''', (Jsonb(extraction.model_dump()), event_id, row['id']))
@@ -268,6 +274,8 @@ def claim_event(force: bool = False) -> dict | None:
     debounce = env_int('ANALYZE_DEBOUNCE_SECONDS', 180)
     reanalyze = env_int('REANALYZE_MIN_SECONDS', 900)
     with database() as conn:
+        conn.execute('''UPDATE economic_events SET status = 'open' WHERE status = 'analyzing'
+                        AND next_attempt_at < now() - interval '30 minutes' ''')
         row = conn.execute('''
             SELECT * FROM economic_events
             WHERE needs_analysis AND importance >= %s AND next_attempt_at <= now() AND status <> 'analyzing'
@@ -277,7 +285,8 @@ def claim_event(force: bool = False) -> dict | None:
             ORDER BY importance DESC, last_seen_at LIMIT 1 FOR UPDATE SKIP LOCKED''',
             (min_importance, force, debounce, force, reanalyze)).fetchone()
         if row:
-            conn.execute("UPDATE economic_events SET status = 'analyzing', attempts = attempts + 1 WHERE id = %s", (row['id'],))
+            conn.execute("UPDATE economic_events SET status = 'analyzing', attempts = attempts + 1, next_attempt_at = now() "
+                         "WHERE id = %s", (row['id'],))
         return row
 
 
@@ -348,6 +357,10 @@ def run_analyze(force: bool = False) -> dict:
         log.warning('analyze %s failed: %s', event['id'], error)
         _release_event(event, seconds=120 * max(1, event['attempts']) ** 2, error=str(error)[:120])
         return {'analyzed': 0, 'eventId': event['id'], 'error': str(error)[:200]}
+    flags = consistency.check(analysis)
+    if flags:
+        log.info('analysis of %s has %s consistency flag(s): %s', event['id'], len(flags),
+                 ', '.join(f['code'] for f in flags))
     reliability = int((event['facts'] or {}).get('reliability') or 60)
     prices = reactions.fetch_prices(reactions.measurable([i.asset for i in analysis.asset_impacts])) if analysis.asset_impacts else {}
     with database() as conn:
@@ -355,13 +368,13 @@ def run_analyze(force: bool = False) -> dict:
         analysis_id = conn.execute('''
             INSERT INTO event_analysis (event_id, version, model, summary, what_happened, why_it_matters, what_changed,
                 economic_interpretation, central_bank_implication, risk_regime_impact, causal_chain, relation_to_trend,
-                horizon, is_new_information, evidence_strength, confidence, key_risks, raw)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+                horizon, is_new_information, evidence_strength, confidence, key_risks, consistency_flags, raw)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
             (event['id'], version, _model_label(), analysis.summary, analysis.what_happened, analysis.why_it_matters,
              analysis.what_changed_vs_expectations, Jsonb(analysis.economic_interpretation.model_dump()),
              Jsonb(analysis.central_bank_implication.model_dump()), analysis.risk_regime_impact, Jsonb(analysis.causal_chain),
              analysis.relation_to_trend, analysis.horizon, analysis.is_new_information, analysis.evidence_strength,
-             analysis.confidence, Jsonb(analysis.key_risks), Jsonb(analysis.model_dump()))).fetchone()['id']
+             analysis.confidence, Jsonb(analysis.key_risks), Jsonb(flags), Jsonb(analysis.model_dump()))).fetchone()['id']
         for impact in analysis.asset_impacts:
             conn.execute('''INSERT INTO asset_impacts (analysis_id, event_id, asset, immediate_direction, immediate_score,
                                 short_term_direction, short_term_score, medium_term_direction, medium_term_score, rationale)
@@ -393,12 +406,12 @@ def run_analyze(force: bool = False) -> dict:
             alert = {'error': str(error)[:200]}
     return {'analyzed': 1, 'eventId': event['id'], 'version': version, 'summary': analysis.summary,
             'assetImpacts': len(analysis.asset_impacts), 'macroStateChanges': changes, 'reactionWindows': opened,
-            'alert': alert}
+            'consistencyFlags': flags, 'alert': alert}
 
 
 def _model_label() -> str:
-    from app.config import ai_provider, env
-    return 'mock' if ai_provider() == 'mock' else (env('ANALYST_MODEL', 'claude-opus-5') or 'claude-opus-5')
+    from app.config import ai_provider, model_for
+    return 'mock' if ai_provider() == 'mock' else f'{ai_provider()}:{model_for("analyst")}'
 
 
 def _release_event(event: dict, seconds: int, error: str) -> None:

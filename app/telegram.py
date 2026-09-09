@@ -40,15 +40,23 @@ def chunks(text: str, limit: int = CHUNK) -> list[str]:
     return parts or ['']
 
 
+def render_chunks(text: str, parse_mode: str | None) -> list[str]:
+    """HTML_PRE = fixed-width block (tables stay aligned in Telegram); each chunk is escaped and wrapped on its own."""
+    if parse_mode == 'HTML_PRE':
+        # Escape first: entities widen the text, and they never contain newlines, so line-based chunking stays safe.
+        return [f'<pre>{part}</pre>' for part in chunks(html.escape(text), CHUNK - 11)]
+    return chunks(text)
+
+
 def send(text: str, parse_mode: str | None = None) -> None:
     token, chat_id = env('TELEGRAM_BOT_TOKEN'), env('TELEGRAM_CHAT_ID')
     if not token or not chat_id:
         raise TelegramError('TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set', retryable=False)
     with httpx.Client(timeout=20) as client:
-        for part in chunks(text):
+        for part in render_chunks(text, parse_mode):
             payload = {'chat_id': chat_id, 'text': part, 'disable_web_page_preview': True}
             if parse_mode:
-                payload['parse_mode'] = parse_mode
+                payload['parse_mode'] = 'HTML' if parse_mode == 'HTML_PRE' else parse_mode
             try:
                 response = client.post(f'https://api.telegram.org/bot{token}/sendMessage', json=payload)
             except httpx.HTTPError as error:

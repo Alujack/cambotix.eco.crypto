@@ -53,3 +53,13 @@ def test_alpha_vantage_topics_map_to_categories():
                                                         'country': 'GLOBAL', 'priority': 55, 'default_categories': []},
                     topics=['economy_monetary'])
     assert 'MONETARY_POLICY' in tags['categories']
+
+
+def test_normalize_countries_maps_names_to_iso2():
+    from app.normalize import normalize_countries
+    assert normalize_countries(['Canada', 'United States', 'canada']) == ['CA', 'US']
+    assert normalize_countries(['U.S.', 'Euro area', 'UK', 'Iran']) == ['US', 'EU', 'GB', 'IR']
+    assert normalize_countries(['World', 'Middle East']) == ['GLOBAL']
+    assert normalize_countries(['Freedonia']) == ['GLOBAL']   # unknown long form degrades, never leaks a bad key
+    assert normalize_countries([]) == [] and normalize_countries(None) == []
+    assert normalize_countries(['us', ' ca ']) == ['US', 'CA']

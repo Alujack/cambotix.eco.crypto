@@ -63,7 +63,7 @@ def find_event(conn, extraction: Extraction, headline: str, published_at, vector
         SELECT id, title FROM economic_events
         WHERE event_type = %s AND countries && %s AND last_seen_at >= %s AND first_seen_at <= %s
         ORDER BY last_seen_at DESC LIMIT 25''',
-        (extraction.event_type, [c.upper() for c in extraction.countries] or ['GLOBAL'],
+        (extraction.event_type, extraction.countries or ['GLOBAL'],
          published_at - timedelta(hours=36), published_at + timedelta(hours=36))).fetchall()
     probe = tokens(headline) | tokens(extraction.fact_summary)
     best, best_score = None, 0.0

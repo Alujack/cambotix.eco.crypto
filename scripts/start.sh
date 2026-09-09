@@ -2,6 +2,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 scripts/setup.py
+ai_provider=$(grep -E '^AI_PROVIDER=' .env | cut -d= -f2- || true)
+emb_provider=$(grep -E '^EMBEDDINGS_PROVIDER=' .env | cut -d= -f2- || true)
+runtime=$(grep -E '^OLLAMA_RUNTIME=' .env | cut -d= -f2- || true)
+if { [ "$ai_provider" = "ollama" ] || [ "$emb_provider" = "ollama" ]; } && [ "$runtime" = "native" ]; then
+  python3 scripts/native_ollama.py
+fi
 docker compose up -d --build --wait
 needs_import=0
 if [ ! -f .local/workflows-installed ]; then needs_import=1; fi
@@ -26,4 +32,7 @@ if [ "$needs_import" = 1 ]; then
   touch .local/workflows-installed
 fi
 rm -f .local/import/credentials.json
+if [ "$ai_provider" = "ollama" ] || [ "$emb_provider" = "ollama" ]; then
+  python3 scripts/pull_models.py
+fi
 python3 scripts/status.py

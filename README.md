@@ -32,17 +32,50 @@ This generates `.env` secrets, starts Postgres (pgvector), n8n and the engine, i
 workflows, and prints a status view. Open **http://localhost:5681** and create the local n8n owner account — the
 workflows are already active. Existing n8n installs on 5678/5679/5680 are unaffected.
 
-Then put your key in `.env` and restart the engine:
+Nothing else is required: the AI runs locally on **Llama 3.1 8B through Ollama**, pulled by `start.sh`. On macOS a
+project-local, checksum-verified Ollama serves on `127.0.0.1:11436` with Metal acceleration (binaries, models and logs
+under `.local/ollama`, separate from any system Ollama); elsewhere the `docker-ai` compose profile runs it in a
+container, with `compose.gpu.yaml` for NVIDIA passthrough. Embeddings use `nomic-embed-text` locally, so pgvector
+memory works with no API key at all.
+
+Optional keys in `.env`:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...        # required for extraction + analysis (collection works without it)
-OPENAI_API_KEY=sk-...               # optional: enables pgvector memory (embeddings). Or EMBEDDINGS_PROVIDER=voyage|ollama
-ALPHA_VANTAGE_API_KEY=...           # optional: hourly aggregated news (free tier ≈ 25 req/day)
-docker compose up -d engine
+ALPHA_VANTAGE_API_KEY=...           # hourly aggregated news (free tier ≈ 25 req/day)
+COINGECKO_API_KEY=...               # higher rate limits for the reaction tracker
 ```
 
-Without an Anthropic key the collectors keep filling `raw_articles`; `/process/extract` and `/process/analyze` return
-503 until the key is set (or `AI_PROVIDER=mock` for an offline run).
+To switch the analyst to Claude instead (see the quality note below):
+
+```bash
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+docker compose up -d engine          # EXTRACT_MODEL / ANALYST_MODEL fall back to the provider's defaults
+```
+
+`AI_PROVIDER=mock` is the deterministic offline stand-in used by tests and the smoke run.
+
+### Local-model throughput and quality
+
+Measured on an M1 Pro / 16 GB with `llama3.1:8b`: **~25 s per article** for extraction, **~2 min per event** for
+analysis. That comfortably outpaces arrivals (~15 articles/hour from the current feed set). Local inference is serial,
+so `/process/extract` and `/process/analyze` hold a lock and answer `{"skipped": "busy"}` if a tick arrives while a
+previous one is still running — the n8n executions stay green.
+
+One thing is off by default because of this: the brief's **model-written narrative paragraph**. Running locally,
+llama3.1:8b produced a fluent paragraph that asserted "the BOJ's decision to hike rates" — an event that appeared
+nowhere in its input. A fabricated macro fact delivered to Telegram as fact is worse than no paragraph, so the
+narrative is on for `anthropic`/`mock` and **off for `ollama`** unless you set `BRIEF_USE_AI=true`. Every other
+section of the brief is computed from the database and never depends on model prose.
+
+Quality is the real trade-off. An 8B model reliably produces schema-valid output and decent fact extraction, but its
+economic reasoning is shallower than the Opus-class analyst this pipeline was designed around, and it sometimes
+contradicts itself (calling an event risk-off while scoring equities bullish). The engine therefore **measures** that
+rather than hiding it: every analysis is checked for self-consistency and the flags are stored, surfaced in
+`GET /analysis-quality`, `scripts/status.py` and the daily brief. Observed flag codes are `risk_regime_sign`
+(sign disagrees with the stated risk regime), `zero_with_direction` (a directional rationale scored 0),
+`duplicate_rationale` and `summary_repeats_event`. Use that endpoint to decide whether a local model is good enough
+for a given job, or to compare models — `ANALYST_MODEL` is the only thing that has to change.
 
 ```bash
 python3 scripts/status.py           # health, sources delivering, macro state, newest events
@@ -69,25 +102,29 @@ next start. Back up `.env` with the volumes — the encryption key is needed to 
 2. **Normalize + dedupe** — every item becomes one `raw_articles` row: UTC timestamp, cleaned text, source
    reliability (0–100), keyword priors for category/asset/country and an importance prior. The `content_hash`
    (source + guid/url/headline) is the duplicate gate; stale items (> 72 h) are stored but not processed.
-3. **Extract (stage 1, cheap model)** — `claude-haiku-4-5` with a strict JSON schema turns the item into facts: event
+3. **Extract (stage 1)** — the extractor model with a strict JSON schema (Ollama's grammar-constrained `format`,
+   or Anthropic structured outputs) turns the item into facts: event
    type, subject, date, countries, actual/forecast/previous, surprise, tone, importance, "is this reaction coverage".
    Irrelevant items are marked `ignored` before any reasoning is spent.
 4. **Cluster** — "Fed holds rates" from 20 outlets is one event. Match order: exact `event_key`
    (`type|country|date[|subject]`) → pgvector cosine similarity over event embeddings within ±48 h → lexical Jaccard
    fallback. Facts merge by source reliability; the official source becomes the primary.
-5. **Analyze (stage 2, reasoning model)** — `claude-opus-5` (adaptive thinking, structured output) receives the event,
+5. **Analyze (stage 2)** — the analyst model receives the event,
    its coverage, the current macro state, the previous three events of the same type, related memory from pgvector,
    same-day release prints and the `economic_asset_map` priors. It returns the summary, economic interpretation,
    central-bank implication, risk-regime read, a causal chain, per-asset × per-horizon impact scores, macro-state
-   nudges and key risks. Analyses are versioned; new informative coverage triggers re-analysis after a debounce.
+   nudges and key risks, and is checked for self-consistency. Analyses are versioned; new informative coverage
+   triggers re-analysis after a debounce.
 6. **Macro state** — each `region × dimension` score (-100..100) moves by `old·(1-w) + target·w`, where `w` is a
    function of event importance, analyst confidence and source reliability (0.05–0.60). Labels and trends are derived
    deterministically; every change is journaled in `macro_state_history`.
 7. **Market reactions** — when an analysis lands, BTC/ETH prices are anchored (CoinGecko; Gold/EURUSD via Alpha
    Vantage when `REACTIONS_FX_ENABLED=true`) and measured at 5m/15m/1h/4h/24h against the expected direction:
    `CONFIRMED / REJECTED / FLAT`.
-8. **Briefs + delivery** — `POST /briefs/daily` (06:00 UTC by workflow 11) renders the macro regime, high-impact
-   releases, developments, asset pressure and risks; the narrative paragraph is model-written when a key is configured.
+8. **Briefs + delivery** — `POST /briefs/daily` (06:00 UTC by workflow 11) renders a pipeline status line, the macro
+   regime (traffic lights; collapsed until the first analysis), HIGH releases in the next 48 h, analyzed developments,
+   official-source items and the top headlines of the day by keyword signal, asset pressure and risks; the narrative
+   paragraph is model-written when a key is configured. Telegram receives it as a fixed-width block.
    Briefs and high-importance alerts are delivered to Telegram through the `notifications` outbox (workflow 12 retries).
 
 ### Asset universe and scoring
@@ -125,6 +162,7 @@ All routes except `/health` need the header `X-Eco-Token: <ENGINE_TOKEN>` (from 
 | `GET /analysis/{asset}` | Decay-weighted bias, contributing events with rationale, reaction scorecard |
 | `GET /briefs/latest?format=text` | Newest daily brief |
 | `GET /sources` | Registry with article counts |
+| `GET /analysis-quality?days=7` | Analyses, self-consistency flags and average confidence per model |
 | `GET /notify/status`, `POST /notify/flush`, `POST /notify/test` | Telegram outbox |
 | `POST /ingest/articles`, `/ingest/calendar` | Called by n8n collectors |
 | `POST /process/extract?batch=5`, `/process/analyze?force=false`, `/process/reactions`, `/briefs/daily` | Called by n8n schedulers; `force=true` skips the coverage debounce for a manual run |
@@ -132,12 +170,14 @@ All routes except `/health` need the header `X-Eco-Token: <ENGINE_TOKEN>` (from 
 ## Layout
 
 ```text
-app/            FastAPI engine: pipeline.py (write path), intel.py (read models), ai.py (Claude + mock),
-                clustering.py, macro_state.py, reactions.py, briefs.py, normalize.py, schemas.py, prompts.py
+app/            FastAPI engine: pipeline.py (write path), intel.py (read models), ai.py (Ollama + Claude + mock),
+                clustering.py, consistency.py, macro_state.py, reactions.py, briefs.py, telegram.py, normalize.py,
+                schemas.py, prompts.py, embeddings.py
 db/             01-databases.sql (n8n db), 02-schema.sql (engine schema + seeds)
 sources/        registry.json — the source registry (reliability, priority, workflow group)
 n8n/            generated workflow templates (eco01…eco11), committed for review
-scripts/        setup.py · start.sh · status.py · smoke.py · test.sh · telegram_setup.py
+scripts/        setup.py · start.sh · status.py · smoke.py · test.sh · telegram_setup.py · native_ollama.py ·
+                pull_models.py
 tests/          unit tests (run anywhere) + database tests (scripts/test.sh)
 docs/           architecture.md — design notes, data model, roadmap
 ```

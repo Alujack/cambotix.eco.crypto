@@ -3,7 +3,7 @@ import logging
 
 import httpx
 
-from app.config import env
+from app.config import env, ollama_base_url
 
 log = logging.getLogger('eco.embeddings')
 DEFAULT_MODELS = {'openai': 'text-embedding-3-small', 'voyage': 'voyage-3-lite', 'ollama': 'nomic-embed-text'}
@@ -11,7 +11,7 @@ _warned = set()
 
 
 def provider() -> str:
-    name = env('EMBEDDINGS_PROVIDER', 'openai').strip().lower()
+    name = env('EMBEDDINGS_PROVIDER', 'ollama').strip().lower()
     if name == 'openai' and not env('OPENAI_API_KEY'):
         return 'none'
     if name == 'voyage' and not env('VOYAGE_API_KEY'):
@@ -48,7 +48,7 @@ def embed(texts: list[str]) -> list[list[float]] | None:
                                        headers={'Authorization': 'Bearer ' + env('VOYAGE_API_KEY')})
                 response.raise_for_status()
                 return [item['embedding'] for item in response.json()['data']]
-            response = client.post(env('OLLAMA_BASE_URL', 'http://host.docker.internal:11434').rstrip('/') + '/api/embed',
+            response = client.post(ollama_base_url() + '/api/embed',
                                    json={'model': model, 'input': texts})
             response.raise_for_status()
             return response.json()['embeddings']

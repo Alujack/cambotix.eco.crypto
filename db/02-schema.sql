@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS event_analysis (
     evidence_strength text,
     confidence integer NOT NULL,
     key_risks jsonb NOT NULL DEFAULT '[]',
+    consistency_flags jsonb NOT NULL DEFAULT '[]',
     raw jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (event_id, version)
@@ -217,6 +218,8 @@ CREATE TABLE IF NOT EXISTS briefs (
     UNIQUE (kind, brief_date)
 );
 
+ALTER TABLE event_analysis ADD COLUMN IF NOT EXISTS consistency_flags jsonb NOT NULL DEFAULT '[]';
+
 -- Notification outbox (Telegram). Enqueued by the engine, flushed immediately and retried by n8n workflow 12.
 CREATE TABLE IF NOT EXISTS notifications (
     id bigserial PRIMARY KEY,
@@ -269,6 +272,14 @@ INSERT INTO economic_asset_map (driver, asset, direction, note) VALUES
     ('RECESSION_RISK', 'SPX', -1, NULL), ('RECESSION_RISK', 'US10Y', -1, 'Flight to bonds'),
     ('MAJOR_WAR', 'USD', 0, 'Haven bid vs growth hit'), ('MAJOR_WAR', 'XAUUSD', 1, NULL), ('MAJOR_WAR', 'BTC', -1, NULL),
     ('MAJOR_WAR', 'SPX', -1, NULL), ('MAJOR_WAR', 'US10Y', -1, NULL), ('MAJOR_WAR', 'OIL', 1, NULL),
+    ('TARIFFS_TRADE_WAR', 'USD', 1, 'Stagflationary: import prices up, growth down'),
+    ('TARIFFS_TRADE_WAR', 'XAUUSD', 1, 'Haven and inflation hedge'), ('TARIFFS_TRADE_WAR', 'BTC', -1, 'Risk-off'),
+    ('TARIFFS_TRADE_WAR', 'SPX', -1, 'Margin and demand hit'),
+    ('TARIFFS_TRADE_WAR', 'US10Y', 0, 'Inflation lifts yields, growth fear lowers them'),
+    ('SUPPLY_SHOCK', 'OIL', 1, NULL), ('SUPPLY_SHOCK', 'XAUUSD', 1, NULL), ('SUPPLY_SHOCK', 'SPX', -1, NULL),
+    ('SUPPLY_SHOCK', 'US10Y', 1, 'Inflation expectations up'),
+    ('BANKING_STRESS', 'USD', -1, NULL), ('BANKING_STRESS', 'XAUUSD', 1, NULL), ('BANKING_STRESS', 'SPX', -1, NULL),
+    ('BANKING_STRESS', 'US10Y', -1, 'Flight to quality'), ('BANKING_STRESS', 'BTC', -1, 'Liquidity stress dominates'),
     ('CRYPTO_ETF_APPROVAL', 'BTC', 2, NULL), ('CRYPTO_ETF_APPROVAL', 'ETH', 2, NULL),
     ('CRYPTO_REGULATORY_CRACKDOWN', 'BTC', -2, NULL), ('CRYPTO_REGULATORY_CRACKDOWN', 'ETH', -2, NULL),
     ('EXCHANGE_FAILURE', 'BTC', -2, NULL), ('EXCHANGE_FAILURE', 'ETH', -2, NULL),

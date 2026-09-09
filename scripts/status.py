@@ -25,8 +25,11 @@ def main():
         raise SystemExit(f'Engine not reachable at {base}: {error}')
     ai = health['ai']
     print(f"Engine        {base}  ok   trades={health['trades']}")
-    print(f"AI            {ai['provider']}  {'configured' if ai['configured'] else 'NOT CONFIGURED (set ANTHROPIC_API_KEY)'}"
-          f"  extract={ai['extractModel']}  analyst={ai['analystModel']}")
+    state = 'configured' if ai['configured'] else 'NOT CONFIGURED (set AI_PROVIDER / key)'
+    if ai['provider'] == 'ollama':
+        state = (f"{ai['ollama']} reachable" + (f", missing models: {', '.join(ai['missingModels'])}" if ai.get('missingModels') else '')
+                 if ai.get('reachable') else f"{ai.get('ollama')} NOT REACHABLE ({ai.get('error', '')})")
+    print(f"AI            {ai['provider']}  extract={ai['extractModel']}  analyst={ai['analystModel']}  {state}")
     print(f"Embeddings    {health['embeddings']['provider']}  {health['embeddings']['model'] or ''}")
     print(f"n8n editor    http://localhost:{env.get('N8N_PORT', '5681')}")
     tg = get(base, env['ENGINE_TOKEN'], '/notify/status')
@@ -43,6 +46,10 @@ def main():
     print(f"Macro         risk={macro['riskRegime']}  liquidity={macro['globalLiquidity']}  "
           f"geopolitics={macro['geopoliticalRisk']}")
     print('Asset bias    ' + '  '.join(f"{asset} {data['score']:+d}" for asset, data in macro['assets'].items()))
+    quality = get(base, env['ENGINE_TOKEN'], '/analysis-quality?days=7')
+    for row in quality:
+        print(f"Analyst       {row['model']}: {row['analyses']} analyses, {row['flagged']} flagged"
+              f"{' (' + ', '.join(row['codes'] or []) + ')' if row['flagged'] else ''}, avg confidence {row['avg_confidence']}")
     events = get(base, env['ENGINE_TOKEN'], '/events/recent?hours=48&limit=8')
     print(f"Events (48h)  {len(events)} shown")
     for event in events:

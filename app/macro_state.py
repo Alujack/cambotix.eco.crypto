@@ -41,17 +41,44 @@ def blend(old_score: int, direction: int, magnitude: int, w: float) -> int:
     return clamp(old_score * (1 - w) + target * w)
 
 
+# Desk-eye traffic light per label position (most positive score first). Judgement calls, not truth.
+LIGHTS = {
+    'inflation': ['🔴', '🟡', '🟢', '🟡', '🔴'],
+    'employment': ['🟡', '🟢', '🟢', '🟡', '🔴'],
+    'growth': ['🟢', '🟢', '🟡', '🔴', '🔴'],
+    'monetary_policy': ['🔴', '🟠', '🟡', '🟢', '🟡'],
+    'liquidity': ['🟢', '🟢', '🟡', '🔴', '🔴'],
+    'fiscal': ['🟡', '🟢', '🟡', '🟠', '🔴'],
+    'risk_appetite': ['🟡', '🟢', '🟡', '🔴', '🔴'],
+    'geopolitical_risk': ['🔴', '🟠', '🟡', '🟢', '🟢'],
+    'energy': ['🔴', '🟠', '🟢', '🟡', '🟡'],
+    'regulation': ['🟢', '🟢', '🟡', '🟠', '🔴'],
+    'adoption': ['🟢', '🟢', '🟡', '🟠', '🔴'],
+    'market_structure': ['🟢', '🟢', '🟡', '🟠', '🔴'],
+}
+
+
+def label_index(score: int) -> int:
+    if score >= 50:
+        return 0
+    if score >= 20:
+        return 1
+    if score > -20:
+        return 2
+    if score > -50:
+        return 3
+    return 4
+
+
 def state_label(dimension: str, score: int) -> str:
     labels = LABELS.get(dimension) or ['HIGH', 'ELEVATED', 'NEUTRAL', 'LOW', 'VERY_LOW']
-    if score >= 50:
-        return labels[0]
-    if score >= 20:
-        return labels[1]
-    if score > -20:
-        return labels[2]
-    if score > -50:
-        return labels[3]
-    return labels[4]
+    return labels[label_index(score)]
+
+
+def light(dimension: str, score: int, known: bool = True) -> str:
+    if not known:
+        return '⚪'
+    return (LIGHTS.get(dimension) or ['🟡'] * 5)[label_index(score)]
 
 
 def trend_label(new_score: int, previous_scores: list[int]) -> str:

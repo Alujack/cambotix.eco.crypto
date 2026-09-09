@@ -19,3 +19,12 @@ def test_event_alert_is_escaped_html():
     assert text.startswith('🔴 <b>US CPI &lt;hot&gt; &amp; sticky</b>')
     assert 'Fed MORE_HAWKISH' in text and 'USD +60/+42' in text and '3 source item(s)' in text
     assert '<hot>' not in text
+
+
+def test_pre_chunks_are_wrapped_and_escaped():
+    from app.telegram import render_chunks
+    parts = render_chunks('a <b> & c\n' * 800, 'HTML_PRE')
+    assert len(parts) > 1
+    assert all(p.startswith('<pre>') and p.endswith('</pre>') and len(p) <= 3900 for p in parts)
+    assert '&lt;b&gt; &amp;' in parts[0] and '<b>' not in parts[0]
+    assert render_chunks('plain', None) == ['plain']

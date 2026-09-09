@@ -8,8 +8,12 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - Python 3.12 + FastAPI (`app/`) — ingest, dedupe, extraction, event clustering, analyst, macro state, reactions,
   briefs, and the intelligence API. Runs as the `engine` service on 127.0.0.1:8020
 - PostgreSQL 17 + pgvector (`db/02-schema.sql`) — one database `eco`; vector memory in `knowledge_embeddings`
-- Anthropic SDK — stage 1 extractor `claude-haiku-4-5`, stage 2 analyst `claude-opus-5` (adaptive thinking,
-  structured outputs). `AI_PROVIDER=mock` is the offline stand-in for tests/smoke
+- AI is provider-switchable via `AI_PROVIDER`: `ollama` (default — Llama 3.1 8B local, grammar-constrained JSON),
+  `anthropic` (`claude-haiku-4-5` extractor + `claude-opus-5` analyst, adaptive thinking, structured outputs),
+  `mock` (offline stand-in for tests/smoke). `EXTRACT_MODEL`/`ANALYST_MODEL` fall back to the provider's defaults,
+  so a stale `claude-*` value never leaks into an Ollama run — see `app/config.model_for`
+- Ollama: macOS runs a project-local native server on 127.0.0.1:11436 (`scripts/native_ollama.py`, Metal); other hosts
+  use the `docker-ai` compose profile. Embeddings default to local `nomic-embed-text`
 
 ## Commands
 - `bash scripts/start.sh` — generate `.env`, build, start, import + publish the n8n workflows (first run), print status
@@ -17,7 +21,9 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - `python3 scripts/smoke.py` — synthetic hot-CPI print through the whole pipeline in a throwaway engine container
   (port 8021, mock AI, scratch database `eco_smoke`); production data is never touched
 - `bash scripts/test.sh` — unit + database tests inside the engine container against `eco_tests`
+  (rebuilds the image first: app/ and tests/ are baked in, so without it you would test stale code)
 - `python3 scripts/telegram_setup.py` — connect the bot: discover chat id, write `.env`, restart engine, send a test
+- `python3 scripts/pull_models.py` — make the models named in `.env` present in Ollama
 - `python3 scripts/setup.py` — regenerate `.local/import/*` and the committed `n8n/*.json` templates
 - `docker compose logs --tail=100 engine n8n`
 
@@ -30,6 +36,14 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - LLM calls and Telegram sends never run inside a database transaction (claim → commit → call → write).
 - `db/02-schema.sql` must stay idempotent: the engine applies it on every start (that is the migration step).
 - Every AI output is validated against `app/schemas.py`; structured-output schemas come from those models.
+  Ollama needs `$ref`/`$defs` inlined (`app/ai.inline_refs`) because its decoder takes one flat schema.
+- Model prose is never presented as data: the brief's sections are computed, and the narrative paragraph is gated by
+  `app/config.brief_narrative_enabled` (off for ollama — an 8B model fabricated a BOJ rate hike that was not in its input).
+- Never silently rewrite model output. Disagreements go through `app/consistency.py` as recorded flags, so weak-model
+  analyses can be discounted downstream instead of looking authoritative.
+- Local inference is serial: the extract/analyze endpoints hold a lock and return `skipped: busy` rather than queueing.
+- Country codes are normalized to ISO-2 (`app/normalize.normalize_countries`) before they reach a clustering key —
+  models write "Canada" as often as "CA" and the event key and array matching depend on one spelling.
 - `US10Y` scores are yield direction (BULLISH = yield up). Scores are -100..100, negative = bearish.
 
 ## Glossary

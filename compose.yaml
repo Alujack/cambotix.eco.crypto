@@ -77,6 +77,20 @@ services:
       interval: 10s
       timeout: 3s
       retries: 20
+  # Llama runtime for hosts without a native Ollama (Linux / Windows-WSL2). On macOS scripts/start.sh runs a
+  # project-local native Ollama instead (Metal acceleration) and this profile stays off.
+  ollama:
+    image: ollama/ollama:0.33.3
+    profiles: [docker-ai]
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: 1
+      OLLAMA_MAX_LOADED_MODELS: 2
+      OLLAMA_KEEP_ALIVE: 30m
+    volumes:
+      - ollama_data:/root/.ollama
 volumes:
   postgres_data:
   n8n_data:
+  ollama_data:

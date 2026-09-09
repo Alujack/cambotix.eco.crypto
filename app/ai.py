@@ -9,7 +9,9 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from app.config import ai_provider, anthropic_configured, env, env_int
+import httpx
+
+from app.config import ai_provider, anthropic_configured, env, env_int, model_for, ollama_base_url
 from app.prompts import ANALYST_SYSTEM, BRIEF_SYSTEM, EXTRACTOR_SYSTEM
 from app.schemas import Analysis, Extraction
 
@@ -46,6 +48,51 @@ def strict_schema(model: type[BaseModel]) -> dict:
             out['required'] = list(out['properties'].keys())
         return out
     return walk(copy.deepcopy(model.model_json_schema()))
+
+
+def inline_refs(schema: dict) -> dict:
+    """Resolve local $ref/$defs so grammar-based decoders (Ollama) see one flat schema; our schemas are not recursive."""
+    defs = schema.get('$defs', {})
+
+    def walk(node):
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        if '$ref' in node and node['$ref'].startswith('#/$defs/'):
+            target = defs[node['$ref'].split('/')[-1]]
+            merged = {**walk(target), **{k: v for k, v in node.items() if k != '$ref'}}
+            return merged
+        return {key: walk(value) for key, value in node.items() if key != '$defs'}
+    return walk(schema)
+
+
+def _call_ollama(model: type[M], model_id: str, system: str, user: str, num_ctx: int, num_predict: int) -> M:
+    schema = inline_refs(strict_schema(model))
+    payload = {'model': model_id, 'stream': False, 'format': schema, 'keep_alive': '30m',
+               'options': {'temperature': 0, 'num_ctx': num_ctx, 'num_predict': num_predict},
+               'messages': [{'role': 'system', 'content': system},
+                            {'role': 'user', 'content': user + '\n\nRespond with one JSON object that matches the schema; '
+                                                            'no prose before or after it.'}]}
+    try:
+        with httpx.Client(timeout=float(env_int('AI_TIMEOUT_SECONDS', 300))) as client:
+            response = client.post(ollama_base_url() + '/api/chat', json=payload)
+    except httpx.HTTPError as error:
+        raise AIError(f'ollama unreachable at {ollama_base_url()}: {error}') from error
+    if response.status_code == 404 and 'not found' in response.text:
+        raise AINotConfigured(f'ollama model {model_id!r} is not pulled: {response.text[:160]}')
+    if response.status_code >= 400:
+        raise AIError(f'ollama {response.status_code}: {response.text[:200]}')
+    body = response.json()
+    if body.get('done_reason') == 'length':
+        raise AIError('ollama response truncated at num_predict')
+    log.info('%s prompt=%s out=%s %.1fs', model_id, body.get('prompt_eval_count'), body.get('eval_count'),
+             (body.get('total_duration') or 0) / 1e9)
+    content = (body.get('message') or {}).get('content') or ''
+    try:
+        return model.model_validate_json(content)
+    except ValueError as error:
+        raise AIError(f'ollama output failed schema validation: {str(error)[:200]}') from error
 
 
 def _client():
@@ -109,23 +156,40 @@ def extract(article: dict) -> Extraction:
         'keyword_hints': {'categories': article.get('categories'), 'assets': article.get('assets'),
                           'countries': article.get('countries')},
     }, default=str)
-    return _call_anthropic(Extraction, env('EXTRACT_MODEL', 'claude-haiku-4-5') or 'claude-haiku-4-5',
-                           EXTRACTOR_SYSTEM, user, max_tokens=2048, reasoning=False)
+    if ai_provider() == 'ollama':
+        return _call_ollama(Extraction, model_for('extract'), EXTRACTOR_SYSTEM, user, num_ctx=8192, num_predict=1500)
+    return _call_anthropic(Extraction, model_for('extract'), EXTRACTOR_SYSTEM, user, max_tokens=2048, reasoning=False)
 
 
 def analyze(context: dict) -> Analysis:
     if ai_provider() == 'mock':
         return mock_analyze(context)
-    return _call_anthropic(Analysis, env('ANALYST_MODEL', 'claude-opus-5') or 'claude-opus-5', ANALYST_SYSTEM,
-                           json.dumps(context, default=str), max_tokens=16000, reasoning=True)
+    if ai_provider() == 'ollama':
+        return _call_ollama(Analysis, model_for('analyst'), ANALYST_SYSTEM, json.dumps(context, default=str),
+                            num_ctx=16384, num_predict=4096)
+    return _call_anthropic(Analysis, model_for('analyst'), ANALYST_SYSTEM, json.dumps(context, default=str),
+                           max_tokens=16000, reasoning=True)
 
 
 def narrate_brief(brief: dict) -> str | None:
     if ai_provider() == 'mock':
         return None
+    if ai_provider() == 'ollama':
+        payload = {'model': model_for('analyst'), 'stream': False, 'keep_alive': '30m',
+                   'options': {'temperature': 0.3, 'num_ctx': 16384, 'num_predict': 500},
+                   'messages': [{'role': 'system', 'content': BRIEF_SYSTEM},
+                                {'role': 'user', 'content': json.dumps(brief, default=str)}]}
+        try:
+            with httpx.Client(timeout=float(env_int('AI_TIMEOUT_SECONDS', 300))) as client:
+                response = client.post(ollama_base_url() + '/api/chat', json=payload)
+                response.raise_for_status()
+            return ((response.json().get('message') or {}).get('content') or '').strip() or None
+        except (httpx.HTTPError, ValueError) as error:
+            log.warning('brief narrative skipped: %s', error)
+            return None
     import anthropic
     client = _client()
-    model_id = env('ANALYST_MODEL', 'claude-opus-5') or 'claude-opus-5'
+    model_id = model_for('analyst')
     try:
         response = client.messages.create(model=model_id, max_tokens=2048, system=BRIEF_SYSTEM,
                                           output_config={'effort': 'medium'},

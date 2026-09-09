@@ -64,12 +64,16 @@ def macro_current(conn, now: datetime | None = None) -> dict:
     for row in rows:
         regions.setdefault(row['region'], {})[row['dimension']] = {
             'state': row['state'], 'trend': row['trend'], 'score': row['score'], 'confidence': row['confidence'],
+            'known': row['last_event_id'] is not None,
             'lastEventId': row['last_event_id'], 'updatedAt': row['updated_at']}
     global_state = regions.get('GLOBAL', {})
+    liquidity = global_state.get('liquidity', {})
     return {
         'asOf': now,
         'riskRegime': global_state.get('risk_appetite', {}).get('state', 'UNKNOWN'),
-        'globalLiquidity': global_state.get('liquidity', {}).get('trend', 'UNKNOWN'),
+        # A trend word only once the dimension has been informed by at least one event.
+        'globalLiquidity': {'RISING': 'IMPROVING', 'FALLING': 'DETERIORATING', 'STABLE': 'STABLE'}.get(liquidity.get('trend'), 'UNKNOWN')
+        if liquidity.get('known') else 'UNKNOWN',
         'geopoliticalRisk': global_state.get('geopolitical_risk', {}).get('state', 'UNKNOWN'),
         'regions': regions,
         'assets': {asset: asset_bias(conn, asset, now) for asset in ASSET_UNIVERSE},

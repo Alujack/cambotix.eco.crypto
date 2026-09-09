@@ -112,3 +112,26 @@ def test_outbox_delivers_and_retries(client, monkeypatch):
         conn.execute("UPDATE notifications SET next_attempt_at = now() WHERE status = 'pending'")
     assert telegram.deliver_pending(sender=lambda t, p=None: None)['sent'] == 1
     assert client.get('/notify/status', headers=HEADERS).json()['pending'] == 0
+
+
+def test_interrupted_claims_are_swept_back(client):
+    """A restart mid-batch leaves rows claimed; the sweepers must return them or the queue stalls silently."""
+    from app.db import database
+    from app.pipeline import claim_articles, claim_event
+    stamp = datetime.now(timezone.utc).isoformat()
+    client.post('/ingest/articles', headers=HEADERS, json={'source': 'bls_cpi', 'items': [
+        {'headline': 'CPI rose 3.1% vs 2.9% forecast, previous 2.8%', 'url': 'https://bls.test/sweep', 'publishedAt': stamp}]})
+    with database() as conn:
+        conn.execute("UPDATE raw_articles SET status='extracting', next_attempt_at=now() - interval '25 minutes'")
+    assert len(claim_articles(5)) == 1, 'stale extracting row was not returned to the queue'
+    # That direct claim now owns the row; hand it back so the endpoint can extract it and create the event.
+    with database() as conn:
+        conn.execute("UPDATE raw_articles SET status='queued', next_attempt_at=now()")
+    assert client.post('/process/extract?batch=5', headers=HEADERS).json()['extracted'] == 1
+    with database() as conn:
+        conn.execute("UPDATE economic_events SET status='analyzing', needs_analysis=true, "
+                     "next_attempt_at=now() - interval '35 minutes'")
+    assert claim_event() is not None, 'stale analyzing event was not returned to the queue'
+    with database() as conn:
+        conn.execute("UPDATE economic_events SET status='analyzing', next_attempt_at=now()")
+    assert claim_event() is None, 'a fresh claim must not be stolen'

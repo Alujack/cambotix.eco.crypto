@@ -1,6 +1,7 @@
 import hmac
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Annotated
@@ -12,13 +13,16 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pathlib import Path
 
 from app import ai, briefs, embeddings, intel, pipeline, sources, telegram
-from app.config import ASSET_UNIVERSE, ai_provider, anthropic_configured, env, env_bool
+from app.config import (ASSET_UNIVERSE, ai_configured, ai_provider, brief_narrative_enabled, model_for,
+                        ollama_base_url)
 from app.db import database
 from app.schemas import IngestArticlesRequest, IngestCalendarRequest
 
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s %(name)s %(levelname)s %(message)s')
 log = logging.getLogger('eco')
 SCHEMA = Path(__file__).resolve().parents[1] / 'db' / '02-schema.sql'
+# Local inference is serial: a tick that arrives while a batch is running returns 'busy' instead of queueing.
+EXTRACT_LOCK, ANALYZE_LOCK = threading.Lock(), threading.Lock()
 
 
 @asynccontextmanager
@@ -28,8 +32,8 @@ async def lifespan(_app):
             # The schema is written to be idempotent, so applying it on every start doubles as the migration step.
             conn.execute(SCHEMA.read_text())
             count = sources.seed(conn)
-        log.info('seeded %s sources; ai=%s (%s); embeddings=%s', count, ai_provider(),
-                 'configured' if ai_provider() == 'mock' or anthropic_configured() else 'NOT CONFIGURED', embeddings.provider())
+        log.info('seeded %s sources; ai=%s %s/%s (%s); embeddings=%s', count, ai_provider(), model_for('extract'),
+                 model_for('analyst'), 'configured' if ai_configured() else 'NOT CONFIGURED', embeddings.provider())
     except psycopg.Error as error:
         log.warning('startup seed skipped, database not ready: %s', error)
     yield
@@ -59,11 +63,36 @@ async def unknown_source(request, exc):
 def health():
     with database() as conn:
         conn.execute('SELECT 1')
-    return {'status': 'ok', 'ai': {'provider': ai_provider(),
-                                   'configured': ai_provider() == 'mock' or anthropic_configured(),
-                                   'extractModel': env('EXTRACT_MODEL', 'claude-haiku-4-5'),
-                                   'analystModel': env('ANALYST_MODEL', 'claude-opus-5')},
+    ai_state = {'provider': ai_provider(), 'configured': ai_configured(), 'extractModel': model_for('extract'),
+                'analystModel': model_for('analyst')}
+    if ai_provider() == 'ollama':
+        ai_state.update(ollama_status())
+    return {'status': 'ok', 'ai': ai_state,
             'embeddings': {'provider': embeddings.provider(), 'model': embeddings.model_name()}, 'trades': False}
+
+
+_OLLAMA_PROBE: dict = {'at': 0.0, 'value': {}}
+
+
+def ollama_status(ttl: float = 30.0) -> dict:
+    """Cached: the container healthcheck calls /health every 10s and this reaches out over the network."""
+    import time
+
+    import httpx
+    if time.monotonic() - _OLLAMA_PROBE['at'] < ttl and _OLLAMA_PROBE['value']:
+        return _OLLAMA_PROBE['value']
+    try:
+        with httpx.Client(timeout=3) as client:
+            tags = client.get(ollama_base_url() + '/api/tags').json().get('models', [])
+    except (httpx.HTTPError, ValueError) as error:
+        value = {'ollama': ollama_base_url(), 'reachable': False, 'error': str(error)[:120]}
+    else:
+        names = {model['name'] for model in tags} | {model['name'].split(':')[0] for model in tags}
+        wanted = {model_for('extract'), model_for('analyst'), embeddings.model_name() or ''} - {''}
+        missing = sorted(m for m in wanted if m not in names and m.split(':')[0] not in names)
+        value = {'ollama': ollama_base_url(), 'reachable': True, 'missingModels': missing}
+    _OLLAMA_PROBE.update(at=time.monotonic(), value=value)
+    return value
 
 
 # ---- write path (called by n8n) ---------------------------------------------------------------------------------
@@ -81,7 +110,12 @@ def ingest_calendar(request: IngestCalendarRequest):
 
 @app.post('/process/extract', dependencies=[Depends(authorize)])
 def process_extract(batch: int | None = Query(default=None, ge=1, le=50)):
-    result = pipeline.run_extract(batch)
+    if not EXTRACT_LOCK.acquire(blocking=False):
+        return {'skipped': 'busy', 'detail': 'a previous extract batch is still running'}
+    try:
+        result = pipeline.run_extract(batch)
+    finally:
+        EXTRACT_LOCK.release()
     if result.get('detail') == 'ai_not_configured':
         return JSONResponse(status_code=503, content=result)
     return result
@@ -89,7 +123,12 @@ def process_extract(batch: int | None = Query(default=None, ge=1, le=50)):
 
 @app.post('/process/analyze', dependencies=[Depends(authorize)])
 def process_analyze(force: bool = False):
-    result = pipeline.run_analyze(force)
+    if not ANALYZE_LOCK.acquire(blocking=False):
+        return {'analyzed': 0, 'skipped': 'busy', 'detail': 'a previous analysis is still running'}
+    try:
+        result = pipeline.run_analyze(force)
+    finally:
+        ANALYZE_LOCK.release()
     if result.get('error') == 'ai_not_configured':
         return JSONResponse(status_code=503, content=result)
     return result
@@ -102,11 +141,11 @@ def process_reactions():
 
 @app.post('/briefs/daily', dependencies=[Depends(authorize)])
 def make_daily_brief(brief_date: date | None = None, notify: bool = True):
-    use_ai = env_bool('BRIEF_USE_AI', True) and (ai_provider() == 'mock' or anthropic_configured())
+    use_ai = brief_narrative_enabled() and ai_configured()
     with database() as conn:
         brief = briefs.build_daily(conn, brief_date, use_ai)
         briefs.store(conn, brief, pipeline._model_label() if use_ai else None)
-        queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", brief['text']) if notify else None
+        queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", brief['text'], 'HTML_PRE') if notify else None
     brief['telegram'] = telegram.deliver_pending() if queued else {'skipped': 'not configured' if notify else 'notify=false'}
     return brief
 
@@ -128,6 +167,27 @@ def notify_test():
         telegram.enqueue(conn, 'test', stamp, '✅ Cambotix Economic Intelligence Engine connected.\n'
                          'Daily macro brief arrives at 06:00 UTC; high-impact event alerts as they are analyzed.\n' + stamp)
     return telegram.deliver_pending()
+
+
+@app.get('/analysis-quality', dependencies=[Depends(authorize)])
+def analysis_quality(days: int = Query(default=7, ge=1, le=90)):
+    """How often the analyst contradicts itself, by model. Use it to decide whether a local model is good enough."""
+    with database() as conn:
+        # Aggregate per analysis first: a lateral join over the flag array would multiply the row count.
+        return conn.execute('''
+            SELECT model, count(*) AS analyses,
+                   count(*) FILTER (WHERE flag_count > 0) AS flagged,
+                   coalesce(sum(flag_count), 0) AS flags,
+                   round(avg(confidence)) AS avg_confidence,
+                   round(avg(flag_count), 2) AS avg_flags_per_analysis,
+                   (SELECT jsonb_agg(DISTINCT code) FROM (
+                        SELECT f->>'code' AS code FROM event_analysis inner_ea
+                        CROSS JOIN LATERAL jsonb_array_elements(inner_ea.consistency_flags) f
+                        WHERE inner_ea.model = ea.model AND inner_ea.created_at >= now() - make_interval(days => %s)
+                    ) c) AS codes
+            FROM (SELECT model, confidence, created_at, jsonb_array_length(consistency_flags) AS flag_count
+                  FROM event_analysis WHERE created_at >= now() - make_interval(days => %s)) ea
+            GROUP BY model ORDER BY analyses DESC''', (days, days)).fetchall()
 
 
 @app.get('/notify/status', dependencies=[Depends(authorize)])
