@@ -1,0 +1,38 @@
+# Cambotix Economic Intelligence Engine
+
+Standalone "economic brain": collect → understand → connect → summarize → score → remember economic information.
+It never trades. Gold / forex / crypto engines consume its intelligence API later.
+
+## Stack
+- n8n (Docker, own `n8n` database) — collectors on schedules, thin: RSS/HTTP → Code normalize → POST to the engine
+- Python 3.12 + FastAPI (`app/`) — ingest, dedupe, extraction, event clustering, analyst, macro state, reactions,
+  briefs, and the intelligence API. Runs as the `engine` service on 127.0.0.1:8020
+- PostgreSQL 17 + pgvector (`db/02-schema.sql`) — one database `eco`; vector memory in `knowledge_embeddings`
+- Anthropic SDK — stage 1 extractor `claude-haiku-4-5`, stage 2 analyst `claude-opus-5` (adaptive thinking,
+  structured outputs). `AI_PROVIDER=mock` is the offline stand-in for tests/smoke
+
+## Commands
+- `bash scripts/start.sh` — generate `.env`, build, start, import + publish the n8n workflows (first run), print status
+- `python3 scripts/status.py` — health, queue, macro state, newest events
+- `python3 scripts/smoke.py` — synthetic hot-CPI print through the whole pipeline (needs mock or a real key)
+- `bash scripts/test.sh` — unit + database tests inside the engine container against `eco_tests`
+- `python3 scripts/setup.py` — regenerate `.local/import/*` and the committed `n8n/*.json` templates
+- `docker compose logs --tail=100 engine n8n`
+
+## Rules
+- No trading logic here: no entries, stops, sizing, signals. Output is economic impact analysis only.
+- UTC everywhere (release times, reaction windows, briefs). Never store naive timestamps.
+- Never hardcode secrets; `.env` is generated and gitignored. Workflow JSON references credentials by id only.
+- Sources live in `sources/registry.json` (reliability/priority). Add a feed there and rerun `scripts/setup.py`;
+  do not hand-edit workflows in the n8n UI — regenerate and re-import.
+- LLM calls never run inside a database transaction (claim → commit → call → write).
+- Every AI output is validated against `app/schemas.py`; structured-output schemas come from those models.
+- `US10Y` scores are yield direction (BULLISH = yield up). Scores are -100..100, negative = bearish.
+
+## Glossary
+- article: one collected item (`raw_articles`), deduped by `content_hash`
+- event: one real-world economic event (`economic_events`), many articles; `event_key` = type|country|date[|subject]
+- extraction: stage-1 facts (`raw_articles.extraction`); analysis: stage-2 reasoning (`event_analysis`, versioned)
+- macro state: living score per region×dimension (`macro_state`), journaled in `macro_state_history`
+- asset impact: per-event, per-asset, per-horizon score (immediate 0-4h, short 1-5d, medium 2-8w)
+- reaction: what the market actually did at 5m/15m/1h/4h/24h vs the expected direction

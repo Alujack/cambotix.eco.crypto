@@ -1,0 +1,130 @@
+{
+  "id": "eco07Calendar",
+  "name": "Eco 07 \u2014 Economic calendar",
+  "active": false,
+  "nodes": [
+    {
+      "id": "every-60-minutes",
+      "name": "Every 60 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 60
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "forexfactory-weekly-calendar",
+      "name": "ForexFactory weekly calendar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        0
+      ],
+      "parameters": {
+        "url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "normalize-calendar",
+      "name": "Normalize calendar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// ForexFactory weekly JSON -> canonical calendar batch. Times carry an offset; the engine converts to UTC.\nconst items = [];\nfor (const item of $input.all()) {\n  const r = item.json || {};\n  if (!r.title || !r.date) continue;\n  items.push({\n    title: String(r.title).slice(0, 300),\n    currency: String(r.country || '').toUpperCase(),\n    scheduledAt: r.date,\n    impact: r.impact || '',\n    forecast: r.forecast || null,\n    previous: r.previous || null,\n    actual: r.actual || null,\n  });\n}\nif (!items.length) return [];\nreturn [{ json: { source: 'forexfactory_calendar', items } }];\n"
+      }
+    },
+    {
+      "id": "ingest-calendar",
+      "name": "Ingest calendar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://engine:8000/ingest/calendar",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ecoEngineAuth",
+          "name": "Eco engine internal API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 60 minutes": {
+      "main": [
+        [
+          {
+            "node": "ForexFactory weekly calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ForexFactory weekly calendar": {
+      "main": [
+        [
+          {
+            "node": "Normalize calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize calendar": {
+      "main": [
+        [
+          {
+            "node": "Ingest calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "tags": []
+}

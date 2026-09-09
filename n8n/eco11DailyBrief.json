@@ -1,0 +1,71 @@
+{
+  "id": "eco11DailyBrief",
+  "name": "Eco 11 \u2014 Daily macro brief",
+  "active": false,
+  "nodes": [
+    {
+      "id": "daily-06:00-utc",
+      "name": "Daily 06:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "call-engine--briefs-daily",
+      "name": "Call engine /briefs/daily",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://engine:8000/briefs/daily",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 400000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ecoEngineAuth",
+          "name": "Eco engine internal API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 06:00 UTC": {
+      "main": [
+        [
+          {
+            "node": "Call engine /briefs/daily",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "tags": []
+}

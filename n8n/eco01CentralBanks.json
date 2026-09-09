@@ -1,0 +1,248 @@
+{
+  "id": "eco01CentralBanks",
+  "name": "Eco 01 \u2014 Central banks",
+  "active": false,
+  "nodes": [
+    {
+      "id": "every-5-minutes",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "fed_press_monetary",
+      "name": "fed_press_monetary",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        280,
+        0
+      ],
+      "parameters": {
+        "url": "https://www.federalreserve.gov/feeds/press_monetary.xml",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "fed_press_all",
+      "name": "fed_press_all",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        280,
+        200
+      ],
+      "parameters": {
+        "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "fed_speeches",
+      "name": "fed_speeches",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        280,
+        400
+      ],
+      "parameters": {
+        "url": "https://www.federalreserve.gov/feeds/speeches.xml",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "ecb_press",
+      "name": "ecb_press",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        280,
+        600
+      ],
+      "parameters": {
+        "url": "https://www.ecb.europa.eu/rss/press.html",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "ecb_blog",
+      "name": "ecb_blog",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        280,
+        800
+      ],
+      "parameters": {
+        "url": "https://www.ecb.europa.eu/rss/blog.html",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "normalize-feed-items",
+      "name": "Normalize feed items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// One run per upstream feed node; $prevNode.name is the source key from sources/registry.json.\nconst source = $prevNode.name;\nconst strip = (s) => String(s || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\nconst items = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (!j.title || j.error) continue;\n  items.push({\n    headline: strip(j.title).slice(0, 500),\n    url: j.link || null,\n    externalId: j.guid || j.id || j.link || null,\n    publishedAt: j.isoDate || j.pubDate || j.published || null,\n    content: strip(j.contentSnippet || j.content || j.summary || j.description).slice(0, 4000),\n    publisher: j.creator || j.author || null,\n  });\n}\nif (!items.length) return [];\nreturn [{ json: { source, items } }];\n"
+      }
+    },
+    {
+      "id": "ingest-into-engine",
+      "name": "Ingest into engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://engine:8000/ingest/articles",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ecoEngineAuth",
+          "name": "Eco engine internal API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "fed_press_monetary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "fed_press_all",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "fed_speeches",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "ecb_press",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "ecb_blog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fed_press_monetary": {
+      "main": [
+        [
+          {
+            "node": "Normalize feed items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fed_press_all": {
+      "main": [
+        [
+          {
+            "node": "Normalize feed items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fed_speeches": {
+      "main": [
+        [
+          {
+            "node": "Normalize feed items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ecb_press": {
+      "main": [
+        [
+          {
+            "node": "Normalize feed items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ecb_blog": {
+      "main": [
+        [
+          {
+            "node": "Normalize feed items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize feed items": {
+      "main": [
+        [
+          {
+            "node": "Ingest into engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "tags": []
+}

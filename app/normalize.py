@@ -51,7 +51,9 @@ INSTITUTION_PATTERNS = {
     'SEC': r'\bsec\b', 'CFTC': r'\bcftc\b', 'OPEC': r'\bopec\+?\b', 'US Treasury': r'\btreasury\b',
     'Bank of England': r'\b(boe|bank of england)\b', 'Bank of Japan': r'\b(boj|bank of japan)\b',
 }
-HIGH_SIGNAL = re.compile(r'\b(cpi|fomc|rate decision|nonfarm|payrolls|pce|gdp|fed (cuts?|hikes?|holds?|raises?|lowers?)|'
+HIGH_SIGNAL = re.compile(r'\b(cpi|consumer price index|producer price index|personal income and outlays|'
+                         r'employment situation|gross domestic product|fomc|rate decision|nonfarm|payrolls|pce|gdp|'
+                         r'fed (cuts?|hikes?|holds?|raises?|lowers?)|'
                          r'emergency|default|collapse\w*|bankrupt\w*|hack(ed|ers)?|exploit|approv(es|ed|al)|bans?|'
                          r'banned|shutdown|invasion|ceasefire|tariffs?|sanctions?|halts?|suspends?|lawsuit|charges?)\b',
                          re.IGNORECASE)

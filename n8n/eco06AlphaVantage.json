@@ -1,0 +1,156 @@
+{
+  "id": "eco06AlphaVantage",
+  "name": "Eco 06 \u2014 Alpha Vantage news (hourly, 25/day quota)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "every-60-minutes",
+      "name": "Every 60 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 60
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "alpha-vantage-news_sentiment",
+      "name": "Alpha Vantage NEWS_SENTIMENT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        0
+      ],
+      "parameters": {
+        "url": "https://www.alphavantage.co/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "function",
+              "value": "NEWS_SENTIMENT"
+            },
+            {
+              "name": "topics",
+              "value": "economy_macro,economy_monetary,economy_fiscal,blockchain"
+            },
+            {
+              "name": "sort",
+              "value": "LATEST"
+            },
+            {
+              "name": "limit",
+              "value": "50"
+            },
+            {
+              "name": "apikey",
+              "value": "={{ $env.ALPHA_VANTAGE_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "normalize-alpha-vantage",
+      "name": "Normalize Alpha Vantage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Alpha Vantage NEWS_SENTIMENT -> canonical batch. A rate-limit body has no `feed`, so the branch just stops.\nconst j = $input.first().json || {};\nconst feed = Array.isArray(j.feed) ? j.feed : [];\nconst items = feed.map(a => ({\n  headline: String(a.title || '').slice(0, 500),\n  url: a.url || null,\n  externalId: a.url || null,\n  publishedAt: a.time_published || null,\n  content: String(a.summary || '').slice(0, 4000),\n  publisher: a.source || null,\n  topics: (a.topics || []).map(t => t.topic),\n})).filter(a => a.headline);\nif (!items.length) return [];\nreturn [{ json: { source: 'alphavantage_news', items } }];\n"
+      }
+    },
+    {
+      "id": "ingest-into-engine",
+      "name": "Ingest into engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://engine:8000/ingest/articles",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ecoEngineAuth",
+          "name": "Eco engine internal API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 60 minutes": {
+      "main": [
+        [
+          {
+            "node": "Alpha Vantage NEWS_SENTIMENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alpha Vantage NEWS_SENTIMENT": {
+      "main": [
+        [
+          {
+            "node": "Normalize Alpha Vantage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Alpha Vantage": {
+      "main": [
+        [
+          {
+            "node": "Ingest into engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "tags": []
+}
