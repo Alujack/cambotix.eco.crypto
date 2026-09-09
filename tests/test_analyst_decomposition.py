@@ -103,3 +103,28 @@ def test_anthropic_keeps_the_single_call(monkeypatch):
     assert decompose_analysis() is False
     monkeypatch.setenv('ANALYST_DECOMPOSE', 'true')
     assert decompose_analysis() is True
+
+
+def test_all_zero_score_triggers_a_corrective_retry(ollama):
+    """A small model used "already priced in" to score OIL zero for an intensifying war; the read said it was affected."""
+    zero = {'immediate': {'direction': 'NEUTRAL', 'score': 0}, 'short_term': {'direction': 'NEUTRAL', 'score': 0},
+            'medium_term': {'direction': 'NEUTRAL', 'score': 0}, 'rationale': 'Already priced in.'}
+    calls = stub_calls(ollama, [READ, score(70, 'haven bid'), zero, score(-40, 'demand and margin hit')])
+    analysis = ai.analyze(CONTEXT)
+    assert len(calls) == 4, 'expected a retry for the all-zero score'
+    assert 'scored it 0 on every horizon' in calls[3]['user'] and 'already priced in' in calls[3]['user'].lower()
+    assert {i.asset: i.immediate.score for i in analysis.asset_impacts} == {'XAUUSD': 70, 'SPX': -40}
+    from app.consistency import check
+    assert check(analysis) == []
+
+
+def test_persistent_zero_is_kept_and_flagged(ollama):
+    """If the model declines twice, the number stands but the flag records that it never committed."""
+    zero = {'immediate': {'direction': 'NEUTRAL', 'score': 0}, 'short_term': {'direction': 'NEUTRAL', 'score': 0},
+            'medium_term': {'direction': 'NEUTRAL', 'score': 0}, 'rationale': 'No channel for this asset.'}
+    stub_calls(ollama, [READ, score(70, 'haven bid'), zero, zero])
+    analysis = ai.analyze(CONTEXT)
+    from app.consistency import check
+    codes = {f['code'] for f in check(analysis)}
+    assert 'zero_all_horizons' in codes
+    assert next(i for i in analysis.asset_impacts if i.asset == 'SPX').immediate.score == 0

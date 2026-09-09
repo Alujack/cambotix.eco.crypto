@@ -25,6 +25,11 @@ def check(analysis) -> list[dict]:
         if regime == 'RISK_OFF' and score < -THRESHOLD:
             flags.append({'code': 'haven_sign', 'asset': asset,
                           'detail': f'risk_regime_impact is RISK_OFF but haven {asset} immediate score is {score:+d}'})
+    # Zero on every horizon is a non-commitment, not a judgement: the analysis listed the asset as affected.
+    for asset, impact in sorted(impacts.items()):
+        if impact.immediate.score == 0 and impact.short_term.score == 0 and impact.medium_term.score == 0:
+            flags.append({'code': 'zero_all_horizons', 'asset': asset,
+                          'detail': f'{asset} is listed as affected but scored 0 on every horizon'})
     # A directional rationale paired with a zero score means the model hedged instead of committing.
     for asset, impact in sorted(impacts.items()):
         text = (impact.rationale or '').lower()

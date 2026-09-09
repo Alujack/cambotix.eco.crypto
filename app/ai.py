@@ -189,6 +189,18 @@ def _sign_conflict(asset: str, regime: str, score: int) -> str | None:
     return None
 
 
+def _zero_conflict(asset: str, score) -> str | None:
+    """The read already judged this asset affected; zero on every horizon contradicts that judgement.
+
+    Small models use "already priced in" as a universal escape hatch - one run scored OIL zero for an intensifying
+    war in Iran. This is the model's own two outputs disagreeing, so it earns the same corrective retry as a bad sign.
+    """
+    if score.immediate.score == 0 and score.short_term.score == 0 and score.medium_term.score == 0:
+        return (f'your economic read listed {asset} among the assets this event moves, but you scored it 0 on every '
+                f'horizon, which contradicts that')
+    return None
+
+
 def _call(model, model_id, system, user, *, num_predict, max_tokens, reasoning):
     if ai_provider() == 'ollama':
         return _call_ollama(model, model_id, system, user, num_predict=num_predict)
@@ -225,15 +237,18 @@ def score_asset(read: EconomicRead, asset: str, event: dict, priors: list[dict])
     }
     user = json.dumps(payload, default=str)
     score = _call(AssetScore, model_id, SCORE_SYSTEM, user, num_predict=700, max_tokens=2048, reasoning=False)
-    conflict = _sign_conflict(asset, read.risk_regime_impact, score.immediate.score)
+    conflict = (_sign_conflict(asset, read.risk_regime_impact, score.immediate.score)
+                or _zero_conflict(asset, score))
     if conflict:
-        log.info('%s score contradicts the regime call; retrying once (%s)', asset, conflict)
+        log.info('%s score contradicts the read; retrying once (%s)', asset, conflict)
         retry = _call(AssetScore, model_id, SCORE_SYSTEM,
-                      user + f'\n\nYour previous answer is inconsistent: {conflict}. Either correct the sign, or keep '
-                             'it and state explicitly in the rationale why this asset moves against the risk regime.',
+                      user + f'\n\nYour previous answer is inconsistent: {conflict}. Give the score that follows from '
+                             'the mechanism you describe, or keep your answer and state explicitly in the rationale '
+                             'why this asset does not move as the read implies. Do not use "already priced in" as a '
+                             'reason to avoid committing to a number.',
                       num_predict=700, max_tokens=2048, reasoning=False)
-        # Keep the retry only if it resolved the conflict or explained itself; otherwise the flag records the problem.
-        if not _sign_conflict(asset, read.risk_regime_impact, retry.immediate.score) or len(retry.rationale) > len(score.rationale):
+        resolved = not (_sign_conflict(asset, read.risk_regime_impact, retry.immediate.score) or _zero_conflict(asset, retry))
+        if resolved or len(retry.rationale) > len(score.rationale):
             score = retry
     return score
 

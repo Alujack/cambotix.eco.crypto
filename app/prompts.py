@@ -107,6 +107,8 @@ Rules:
   already seen the event. Say what it means.
 - key_risks: how this read could be wrong or how the situation could escalate, not a restatement of the event.
 - affected_assets: only assets with a real channel from this event. Fewer and correct beats a full list.
+  If you would score an asset zero, or your reason for including it is that the move is "already priced in", leave it
+  out entirely - listing an asset asserts that this event moves it.
   Asset universe: {', '.join(ASSET_UNIVERSE)}. {ASSET_DEFINITIONS}
 - macro_state_updates move a living state. direction +1 raises the dimension score: hotter inflation, stronger
   employment/growth, more restrictive monetary policy, looser liquidity, more expansionary fiscal, more risk
