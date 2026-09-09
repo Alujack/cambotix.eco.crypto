@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
-"""End-to-end smoke test with the offline mock analyst: a synthetic hot CPI print flows
-ingest -> extract -> cluster -> analyze -> macro state -> API. Requires the stack running and AI_PROVIDER=mock
-(pass --mock to override the running engine's provider for this run via the SMOKE_* env of the engine container)."""
+"""End-to-end smoke test with the offline mock analyst, isolated from production data: a throwaway engine container
+(port 8021, AI_PROVIDER=mock) runs against a scratch `eco_smoke` database, and a synthetic hot CPI print flows
+ingest -> extract -> cluster -> analyze -> macro state -> brief -> API. Requires the stack to be running."""
 import json
+import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from setup import read_env  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+PORT = 8021
+DB = 'eco_smoke'
+
+
+def sh(*args, stdin=None, check=True):
+    return subprocess.run(args, cwd=ROOT, input=stdin, text=True, capture_output=True, check=check)
 
 
 def call(base, token, method, path, body=None):
@@ -24,57 +34,80 @@ def call(base, token, method, path, body=None):
         return error.code, json.loads(error.read() or b'{}')
 
 
-def main():
-    env = read_env()
-    base, token = f"http://127.0.0.1:{env.get('ENGINE_PORT', '8020')}", env['ENGINE_TOKEN']
-    status, health = call(base, token, 'GET', '/health')
-    assert status == 200, health
-    if not health['ai']['configured']:
-        raise SystemExit('AI not configured: set ANTHROPIC_API_KEY or AI_PROVIDER=mock in .env and restart the engine.')
+def start_engine(env):
+    sh('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'eco', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
+       '-c', f'DROP DATABASE IF EXISTS {DB};', '-c', f'CREATE DATABASE {DB};')
+    sh('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'eco', '-d', DB, '-v', 'ON_ERROR_STOP=1', '-q',
+       stdin=(ROOT / 'db' / '02-schema.sql').read_text())
+    url = f"postgresql://eco:{env['POSTGRES_PASSWORD']}@postgres:5432/{DB}"
+    container = sh('docker', 'compose', 'run', '-d', '--rm', '--no-deps', '-e', 'AI_PROVIDER=mock', '-e', 'EMBEDDINGS_PROVIDER=none',
+                   '-e', f'ECO_DATABASE_URL={url}', '-p', f'127.0.0.1:{PORT}:8000', 'engine').stdout.strip()
+    base = f'http://127.0.0.1:{PORT}'
+    for _ in range(60):
+        try:
+            with urllib.request.urlopen(base + '/health', timeout=3) as response:
+                if response.status == 200:
+                    return container, base
+        except (urllib.error.URLError, OSError):
+            time.sleep(1)
+    subprocess.run(['docker', 'stop', container], capture_output=True)
+    raise SystemExit('smoke engine did not become healthy; see `docker compose logs engine`')
+
+
+def scenario(base, token):
     stamp = datetime.now(timezone.utc)
-    marker = stamp.strftime('%H%M%S')
     articles = {'source': 'bls_cpi', 'items': [
-        {'headline': f'SMOKE-{marker} CPI rose 0.4% in August; 12-month inflation 3.1% vs 2.9% forecast, previous 2.8%',
-         'url': f'https://www.bls.gov/news.release/cpi.smoke-{marker}.htm', 'publishedAt': stamp.isoformat(),
-         'content': 'The Consumer Price Index for All Urban Consumers increased 0.4 percent. Actual 3.1 vs 2.9 forecast, previous 2.8.'},
-    ]}
+        {'headline': 'CPI rose 0.4% in August; 12-month inflation 3.1% vs 2.9% forecast, previous 2.8%',
+         'url': 'https://www.bls.gov/news.release/cpi.smoke.htm', 'publishedAt': stamp.isoformat(),
+         'content': 'The Consumer Price Index for All Urban Consumers increased 0.4 percent. Actual 3.1 vs 2.9 forecast, previous 2.8.'}]}
     status, result = call(base, token, 'POST', '/ingest/articles', articles)
     assert status == 200 and result['inserted'] == 1, result
-    dup_status, dup = call(base, token, 'POST', '/ingest/articles', articles)
-    assert dup['duplicates'] == 1, dup
+    assert call(base, token, 'POST', '/ingest/articles', articles)[1]['duplicates'] == 1
     print('ingest ok (duplicate rejected)')
     status, result = call(base, token, 'POST', '/ingest/articles', {'source': 'coindesk', 'items': [
-        {'headline': f'SMOKE-{marker} Bitcoin falls after hot US CPI print rattles markets', 'publishedAt': stamp.isoformat(),
-         'url': f'https://www.coindesk.com/smoke-{marker}', 'content': 'BTC dropped 2% after CPI came in at 3.1% vs 2.9% expected.'}]})
-    assert status == 200, result
+        {'headline': 'Bitcoin falls after hot US CPI print rattles markets', 'publishedAt': stamp.isoformat(),
+         'url': 'https://www.coindesk.com/smoke', 'content': 'BTC dropped 2% after CPI came in at 3.1% vs 2.9% expected.'}]})
+    assert status == 200 and result['inserted'] == 1, result
+    status, result = call(base, token, 'POST', '/ingest/articles', {'source': 'decrypt', 'items': [
+        {'headline': 'Top 5 NFT games to play this weekend', 'publishedAt': stamp.isoformat(), 'url': 'https://decrypt.co/smoke'}]})
+    assert status == 200 and result['inserted'] == 1, result
     status, result = call(base, token, 'POST', '/process/extract?batch=10')
     assert status == 200, result
-    print('extract:', {k: v for k, v in result.items() if k in ('claimed', 'extracted', 'ignored', 'errors', 'events_created', 'events_linked')})
-    assert result['extracted'] >= 1, result
-    deadline = time.time() + 120
-    analyzed = None
-    while time.time() < deadline:
-        status, result = call(base, token, 'POST', '/process/analyze')
-        assert status == 200, result
-        if result.get('analyzed'):
-            analyzed = result
-            break
-        time.sleep(3)
-    assert analyzed, 'no event became due for analysis (check ANALYZE_MIN_IMPORTANCE / debounce)'
-    print('analyze:', analyzed['summary'], '| macro changes:', len(analyzed['macroStateChanges']))
+    print('extract:', {k: v for k, v in result.items() if k != 'detail'})
+    assert result['extracted'] == 2 and result['ignored'] == 1 and result['events_created'] == 1, result
+    # force=true skips the coverage debounce so the smoke run does not wait ANALYZE_DEBOUNCE_SECONDS.
+    status, analyzed = call(base, token, 'POST', '/process/analyze?force=true')
+    assert status == 200 and analyzed.get('analyzed') == 1, analyzed
+    print('analyze:', analyzed['summary'], '| asset impacts:', analyzed['assetImpacts'], '| macro changes:', len(analyzed['macroStateChanges']))
     status, detail = call(base, token, 'GET', f"/events/{analyzed['eventId']}")
     assert status == 200 and detail['analysis'], detail
-    print('event has', len(detail['articles']), 'linked article(s), roles:', sorted({a['role'] for a in detail['articles']}))
+    print('event has', len(detail['articles']), 'linked articles, roles:', sorted({a['role'] for a in detail['articles']}))
     status, macro = call(base, token, 'GET', '/macro/current')
-    assert status == 200 and 'US' in macro['regions'], macro
-    print('macro/current:', {k: v['state'] for k, v in macro['regions']['US'].items()})
+    assert status == 200 and macro['regions']['US']['inflation']['score'] > 0, macro
+    print('macro/current US:', {k: f"{v['state']} {v['score']:+d}" for k, v in macro['regions']['US'].items() if v['score']})
+    print('asset bias:', {a: d['score'] for a, d in macro['assets'].items() if d['score']})
+    status, asset = call(base, token, 'GET', '/analysis/XAUUSD')
+    assert status == 200 and asset['bias']['score'] < 0, asset
     status, brief = call(base, token, 'POST', '/briefs/daily')
-    assert status == 200 and brief['text'], brief
+    assert status == 200 and 'GLOBAL MACRO BRIEF' in brief['text'], brief
     print('daily brief rendered,', len(brief['text'].splitlines()), 'lines')
     status, result = call(base, token, 'POST', '/process/reactions')
     assert status == 200, result
     print('reactions:', result)
-    print('SMOKE OK')
+    status, result = call(base, token, 'GET', '/events/recent?hours=1')
+    assert status == 200 and len(result) == 1, result
+
+
+def main():
+    env = read_env()
+    container, base = start_engine(env)
+    try:
+        scenario(base, env['ENGINE_TOKEN'])
+        print('SMOKE OK')
+    finally:
+        subprocess.run(['docker', 'stop', container], capture_output=True)
+        sh('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'eco', '-d', 'postgres', '-c', f'DROP DATABASE IF EXISTS {DB};',
+           check=False)
 
 
 if __name__ == '__main__':

@@ -51,6 +51,32 @@ const items = feed.map(a => ({
 if (!items.length) return [];
 return [{ json: { source: 'alphavantage_news', items } }];
 '''
+XML_NORMALIZE_JS = r"""// Feeds fetched with the HTTP Request node (servers that reject rss-parser's headers) arrive as XML-to-JSON.
+// The XML node carries the source key as its name, so $prevNode.name still identifies the source.
+const source = $prevNode.name;
+const text = (v) => v == null ? '' : (typeof v === 'object' ? String(v._ ?? v['#text'] ?? v.href ?? '') : String(v));
+const strip = (s) => text(s).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+const items = [];
+for (const item of $input.all()) {
+  const root = item.json || {};
+  let entries = (root.rss && root.rss.channel && root.rss.channel.item) || (root.feed && root.feed.entry) || [];
+  if (!Array.isArray(entries)) entries = [entries];
+  for (const e of entries) {
+    const title = strip(e.title);
+    if (!title) continue;
+    items.push({
+      headline: title.slice(0, 500),
+      url: text(e.link) || null,
+      externalId: text(e.guid) || text(e.id) || text(e.link) || null,
+      publishedAt: text(e.pubDate) || text(e.published) || text(e.updated) || text(e['dc:date']) || null,
+      content: strip(e.description || e.summary || e.content || e['content:encoded']).slice(0, 4000),
+      publisher: text(e.author || e['dc:creator']) || null,
+    });
+  }
+}
+if (!items.length) return [];
+return [{ json: { source, items } }];
+"""
 CALENDAR_JS = r'''// ForexFactory weekly JSON -> canonical calendar batch. Times carry an offset; the engine converts to UTC.
 const items = [];
 for (const item of $input.all()) {
@@ -123,15 +149,46 @@ def workflow(identifier, name, nodes, connections):
 
 def collector_workflow(identifier, name, minutes, feeds):
     trigger = schedule(minutes=minutes)
-    normalize = code('Normalize feed items', RSS_NORMALIZE_JS, 560, (len(feeds) - 1) * 100)
-    post = engine_post('Ingest into engine', '/ingest/articles', 820, (len(feeds) - 1) * 100, body='={{ JSON.stringify($json) }}')
-    feed_nodes = [node(feed['key'], 'rssFeedRead', {'url': feed['url'], 'options': {}}, 280, i * 200, version=1.1,
-                       onError='continueRegularOutput') for i, feed in enumerate(feeds)]
-    connections = {trigger['name']: {'main': [[{'node': f['name'], 'type': 'main', 'index': 0} for f in feed_nodes]]}}
-    for feed_node in feed_nodes:
-        connections[feed_node['name']] = {'main': [[{'node': normalize['name'], 'type': 'main', 'index': 0}]]}
-    connections.update(chain([normalize, post]))
-    return workflow(identifier, name, [trigger, *feed_nodes, normalize, post], connections)
+    rss_feeds = [f for f in feeds if f.get('fetch', 'rss') == 'rss']
+    http_feeds = [f for f in feeds if f.get('fetch') == 'http']
+    rows = max(1, len(rss_feeds) + 2 * len(http_feeds))
+    post = engine_post('Ingest into engine', '/ingest/articles', 1100, (rows - 1) * 100, body='={{ JSON.stringify($json) }}')
+    nodes, connections = [trigger], {trigger['name']: {'main': [[]]}}
+    y = 0
+    if rss_feeds:
+        normalize = code('Normalize feed items', RSS_NORMALIZE_JS, 820, (len(rss_feeds) - 1) * 100)
+        for feed in rss_feeds:
+            feed_node = node(feed['key'], 'rssFeedRead', {'url': feed['url'], 'options': {}}, 280, y, version=1.1,
+                             onError='continueRegularOutput')
+            nodes.append(feed_node)
+            connections[trigger['name']]['main'][0].append({'node': feed_node['name'], 'type': 'main', 'index': 0})
+            connections[feed_node['name']] = {'main': [[{'node': normalize['name'], 'type': 'main', 'index': 0}]]}
+            y += 200
+        nodes.append(normalize)
+        connections[normalize['name']] = {'main': [[{'node': post['name'], 'type': 'main', 'index': 0}]]}
+    if http_feeds:
+        normalize_xml = code('Normalize XML feed', XML_NORMALIZE_JS, 820, y + (len(http_feeds) - 1) * 100)
+        for feed in http_feeds:
+            # Browser-like headers: some government CDNs answer 406 to rss-parser's Accept/User-Agent.
+            fetch = node(feed['key'] + ' fetch', 'httpRequest', {
+                'url': feed['url'], 'sendHeaders': True,
+                'headerParameters': {'parameters': [
+                    {'name': 'User-Agent', 'value': 'Mozilla/5.0 (compatible; cambotix-eco-crypto)'},
+                    {'name': 'Accept', 'value': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*'}]},
+                'options': {'timeout': 30000, 'response': {'response': {'responseFormat': 'text', 'outputPropertyName': 'data'}}}},
+                280, y, version=4.2, onError='continueRegularOutput')
+            parse = node(feed['key'], 'xml', {'mode': 'xmlToJson', 'dataPropertyName': 'data',
+                                                'options': {'ignoreAttrs': True, 'explicitArray': False}}, 560, y, version=1,
+                         onError='continueRegularOutput')
+            nodes += [fetch, parse]
+            connections[trigger['name']]['main'][0].append({'node': fetch['name'], 'type': 'main', 'index': 0})
+            connections[fetch['name']] = {'main': [[{'node': parse['name'], 'type': 'main', 'index': 0}]]}
+            connections[parse['name']] = {'main': [[{'node': normalize_xml['name'], 'type': 'main', 'index': 0}]]}
+            y += 200
+        nodes.append(normalize_xml)
+        connections[normalize_xml['name']] = {'main': [[{'node': post['name'], 'type': 'main', 'index': 0}]]}
+    nodes.append(post)
+    return workflow(identifier, name, nodes, connections)
 
 
 def build_workflows(registry: dict) -> list[dict]:

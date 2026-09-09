@@ -59,7 +59,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        560,
+        820,
         100
       ],
       "parameters": {
@@ -72,7 +72,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        820,
+        1100,
         100
       ],
       "parameters": {

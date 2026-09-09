@@ -62,6 +62,14 @@ Alpha Vantage aggregate 70 (publisher overrides) · ForexFactory calendar 70 · 
 Cointelegraph 60 · Decrypt 55. Reliability decides which article's facts win inside an event and scales the macro-state
 weight; it is not a truth score.
 
+## Adding a source
+
+Add an entry to `sources/registry.json` (`key`, `url`, `category`, `country`, `priority`, `reliability`,
+`default_categories`, `workflow` group) and run `bash scripts/start.sh`. The generator puts RSS feeds on an RSS Feed
+Read node named after the key; `"fetch": "http"` switches that feed to HTTP Request (browser `User-Agent`/`Accept`) →
+XML → `Normalize XML feed`, for servers such as apps.bea.gov that answer 406 to rss-parser. The engine seeds the
+`sources` table from the same file on start, so the key is known before the first batch arrives.
+
 ## Event clustering
 
 `event_key = TYPE|COUNTRY|EVENT_DATE[|subject-slug]`. Releases (CPI, NFP, FOMC decision …) cluster on type+date alone;

@@ -69,31 +69,84 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "bea_news",
-      "name": "bea_news",
-      "type": "n8n-nodes-base.rssFeedRead",
-      "typeVersion": 1.1,
+      "id": "normalize-feed-items",
+      "name": "Normalize feed items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        820,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// One run per upstream feed node; $prevNode.name is the source key from sources/registry.json.\nconst source = $prevNode.name;\nconst strip = (s) => String(s || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\nconst items = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (!j.title || j.error) continue;\n  items.push({\n    headline: strip(j.title).slice(0, 500),\n    url: j.link || null,\n    externalId: j.guid || j.id || j.link || null,\n    publishedAt: j.isoDate || j.pubDate || j.published || null,\n    content: strip(j.contentSnippet || j.content || j.summary || j.description).slice(0, 4000),\n    publisher: j.creator || j.author || null,\n  });\n}\nif (!items.length) return [];\nreturn [{ json: { source, items } }];\n"
+      }
+    },
+    {
+      "id": "bea_news-fetch",
+      "name": "bea_news fetch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         280,
         600
       ],
       "parameters": {
         "url": "https://apps.bea.gov/rss/rss.xml",
-        "options": {}
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (compatible; cambotix-eco-crypto)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
       },
       "onError": "continueRegularOutput"
     },
     {
-      "id": "normalize-feed-items",
-      "name": "Normalize feed items",
+      "id": "bea_news",
+      "name": "bea_news",
+      "type": "n8n-nodes-base.xml",
+      "typeVersion": 1,
+      "position": [
+        560,
+        600
+      ],
+      "parameters": {
+        "mode": "xmlToJson",
+        "dataPropertyName": "data",
+        "options": {
+          "ignoreAttrs": true,
+          "explicitArray": false
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "normalize-xml-feed",
+      "name": "Normalize XML feed",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        560,
-        300
+        820,
+        600
       ],
       "parameters": {
-        "jsCode": "// One run per upstream feed node; $prevNode.name is the source key from sources/registry.json.\nconst source = $prevNode.name;\nconst strip = (s) => String(s || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\nconst items = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (!j.title || j.error) continue;\n  items.push({\n    headline: strip(j.title).slice(0, 500),\n    url: j.link || null,\n    externalId: j.guid || j.id || j.link || null,\n    publishedAt: j.isoDate || j.pubDate || j.published || null,\n    content: strip(j.contentSnippet || j.content || j.summary || j.description).slice(0, 4000),\n    publisher: j.creator || j.author || null,\n  });\n}\nif (!items.length) return [];\nreturn [{ json: { source, items } }];\n"
+        "jsCode": "// Feeds fetched with the HTTP Request node (servers that reject rss-parser's headers) arrive as XML-to-JSON.\n// The XML node carries the source key as its name, so $prevNode.name still identifies the source.\nconst source = $prevNode.name;\nconst text = (v) => v == null ? '' : (typeof v === 'object' ? String(v._ ?? v['#text'] ?? v.href ?? '') : String(v));\nconst strip = (s) => text(s).replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\nconst items = [];\nfor (const item of $input.all()) {\n  const root = item.json || {};\n  let entries = (root.rss && root.rss.channel && root.rss.channel.item) || (root.feed && root.feed.entry) || [];\n  if (!Array.isArray(entries)) entries = [entries];\n  for (const e of entries) {\n    const title = strip(e.title);\n    if (!title) continue;\n    items.push({\n      headline: title.slice(0, 500),\n      url: text(e.link) || null,\n      externalId: text(e.guid) || text(e.id) || text(e.link) || null,\n      publishedAt: text(e.pubDate) || text(e.published) || text(e.updated) || text(e['dc:date']) || null,\n      content: strip(e.description || e.summary || e.content || e['content:encoded']).slice(0, 4000),\n      publisher: text(e.author || e['dc:creator']) || null,\n    });\n  }\n}\nif (!items.length) return [];\nreturn [{ json: { source, items } }];\n"
       }
     },
     {
@@ -102,8 +155,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        820,
-        300
+        1100,
+        400
       ],
       "parameters": {
         "method": "POST",
@@ -145,7 +198,7 @@
             "index": 0
           },
           {
-            "node": "bea_news",
+            "node": "bea_news fetch",
             "type": "main",
             "index": 0
           }
@@ -185,18 +238,40 @@
         ]
       ]
     },
-    "bea_news": {
+    "Normalize feed items": {
       "main": [
         [
           {
-            "node": "Normalize feed items",
+            "node": "Ingest into engine",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Normalize feed items": {
+    "bea_news fetch": {
+      "main": [
+        [
+          {
+            "node": "bea_news",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "bea_news": {
+      "main": [
+        [
+          {
+            "node": "Normalize XML feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize XML feed": {
       "main": [
         [
           {

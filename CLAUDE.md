@@ -14,7 +14,8 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 ## Commands
 - `bash scripts/start.sh` — generate `.env`, build, start, import + publish the n8n workflows (first run), print status
 - `python3 scripts/status.py` — health, queue, macro state, newest events
-- `python3 scripts/smoke.py` — synthetic hot-CPI print through the whole pipeline (needs mock or a real key)
+- `python3 scripts/smoke.py` — synthetic hot-CPI print through the whole pipeline in a throwaway engine container
+  (port 8021, mock AI, scratch database `eco_smoke`); production data is never touched
 - `bash scripts/test.sh` — unit + database tests inside the engine container against `eco_tests`
 - `python3 scripts/setup.py` — regenerate `.local/import/*` and the committed `n8n/*.json` templates
 - `docker compose logs --tail=100 engine n8n`

@@ -1,6 +1,7 @@
 import hmac
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import date
 from typing import Annotated
 
@@ -15,7 +16,21 @@ from app.schemas import IngestArticlesRequest, IngestCalendarRequest
 
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s %(name)s %(levelname)s %(message)s')
 log = logging.getLogger('eco')
-app = FastAPI(title='Cambotix Economic Intelligence Engine', docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        with database() as conn:
+            count = sources.seed(conn)
+        log.info('seeded %s sources; ai=%s (%s); embeddings=%s', count, ai_provider(),
+                 'configured' if ai_provider() == 'mock' or anthropic_configured() else 'NOT CONFIGURED', embeddings.provider())
+    except psycopg.Error as error:
+        log.warning('startup seed skipped, database not ready: %s', error)
+    yield
+
+
+app = FastAPI(title='Cambotix Economic Intelligence Engine', docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 def authorize(x_eco_token: Annotated[str | None, Header()] = None):
@@ -33,17 +48,6 @@ async def database_error(request, exc):
 @app.exception_handler(pipeline.UnknownSource)
 async def unknown_source(request, exc):
     return JSONResponse(status_code=422, content={'detail': str(exc)})
-
-
-@app.on_event('startup')
-def startup():
-    try:
-        with database() as conn:
-            count = sources.seed(conn)
-        log.info('seeded %s sources; ai=%s (%s); embeddings=%s', count, ai_provider(),
-                 'configured' if ai_provider() == 'mock' or anthropic_configured() else 'NOT CONFIGURED', embeddings.provider())
-    except psycopg.Error as error:
-        log.warning('startup seed skipped, database not ready: %s', error)
 
 
 @app.get('/health')
@@ -79,8 +83,8 @@ def process_extract(batch: int | None = Query(default=None, ge=1, le=50)):
 
 
 @app.post('/process/analyze', dependencies=[Depends(authorize)])
-def process_analyze():
-    result = pipeline.run_analyze()
+def process_analyze(force: bool = False):
+    result = pipeline.run_analyze(force)
     if result.get('error') == 'ai_not_configured':
         return JSONResponse(status_code=503, content=result)
     return result

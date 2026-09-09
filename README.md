@@ -46,10 +46,15 @@ Without an Anthropic key the collectors keep filling `raw_articles`; `/process/e
 
 ```bash
 python3 scripts/status.py           # health, sources delivering, macro state, newest events
-python3 scripts/smoke.py            # synthetic hot-CPI print through the whole pipeline
-bash scripts/test.sh                # unit + database tests in the container
+python3 scripts/smoke.py            # synthetic hot-CPI print through the whole pipeline (isolated, see below)
+bash scripts/test.sh                # unit + database tests in the container (scratch database eco_tests)
 docker compose logs --tail=100 engine n8n
 ```
+
+The smoke run never touches production data: it starts a throwaway engine container on 127.0.0.1:8021 with
+`AI_PROVIDER=mock` against a scratch `eco_smoke` database, runs the scenario, and drops both. While the key is
+missing, workflows **Eco 08** and **Eco 09** show red executions in n8n every tick (the engine answers 503
+`ai_not_configured`) — that is the intended signal, not a bug; they turn green once the key is set.
 
 `docker compose down -v` deletes the database and the n8n state; also remove `.local/workflows-installed` before the
 next start. Back up `.env` with the volumes — the encryption key is needed to decrypt n8n credentials.
@@ -58,7 +63,9 @@ next start. Back up `.env` with the volumes — the encryption key is needed to 
 
 1. **Collect** — n8n workflows 01–07 poll the feeds in [`sources/registry.json`](sources/registry.json) and POST
    canonical batches (`{source, items:[{headline,url,externalId,publishedAt,content,publisher}]}`) to the engine. The
-   workflow JSON is *generated* by `scripts/setup.py` from the registry, so adding a source is a JSON edit + re-run.
+   workflow JSON is *generated* by `scripts/setup.py` from the registry, so adding a source is a JSON edit + re-run of
+   `scripts/start.sh` (it re-imports when a template is newer than the install marker). Feeds whose servers reject the
+   RSS node's headers (BEA answers 406) take `"fetch": "http"` and are fetched with browser headers + the XML node.
 2. **Normalize + dedupe** — every item becomes one `raw_articles` row: UTC timestamp, cleaned text, source
    reliability (0–100), keyword priors for category/asset/country and an importance prior. The `content_hash`
    (source + guid/url/headline) is the duplicate gate; stale items (> 72 h) are stored but not processed.
@@ -103,7 +110,7 @@ All routes except `/health` need the header `X-Eco-Token: <ENGINE_TOKEN>` (from 
 | `GET /briefs/latest?format=text` | Newest daily brief |
 | `GET /sources` | Registry with article counts |
 | `POST /ingest/articles`, `/ingest/calendar` | Called by n8n collectors |
-| `POST /process/extract`, `/process/analyze`, `/process/reactions`, `/briefs/daily` | Called by n8n schedulers |
+| `POST /process/extract?batch=5`, `/process/analyze?force=false`, `/process/reactions`, `/briefs/daily` | Called by n8n schedulers; `force=true` skips the coverage debounce for a manual run |
 
 ## Layout
 

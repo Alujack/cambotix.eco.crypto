@@ -262,7 +262,8 @@ def _facts_from(extraction: Extraction, row: dict) -> dict:
 
 
 # ---- stage 2: analyze -------------------------------------------------------------------------------------------
-def claim_event() -> dict | None:
+def claim_event(force: bool = False) -> dict | None:
+    """force skips the coverage debounce and the re-analysis gap (manual runs, smoke test); thresholds still apply."""
     min_importance = env_int('ANALYZE_MIN_IMPORTANCE', 40)
     debounce = env_int('ANALYZE_DEBOUNCE_SECONDS', 180)
     reanalyze = env_int('REANALYZE_MIN_SECONDS', 900)
@@ -271,10 +272,10 @@ def claim_event() -> dict | None:
             SELECT * FROM economic_events
             WHERE needs_analysis AND importance >= %s AND next_attempt_at <= now() AND status <> 'analyzing'
               AND last_seen_at >= now() - interval '5 days'
-              AND (importance >= 80 OR last_seen_at <= now() - make_interval(secs => %s))
-              AND (analyzed_at IS NULL OR analyzed_at <= now() - make_interval(secs => %s))
+              AND (%s OR importance >= 80 OR last_seen_at <= now() - make_interval(secs => %s))
+              AND (%s OR analyzed_at IS NULL OR analyzed_at <= now() - make_interval(secs => %s))
             ORDER BY importance DESC, last_seen_at LIMIT 1 FOR UPDATE SKIP LOCKED''',
-            (min_importance, debounce, reanalyze)).fetchone()
+            (min_importance, force, debounce, force, reanalyze)).fetchone()
         if row:
             conn.execute("UPDATE economic_events SET status = 'analyzing', attempts = attempts + 1 WHERE id = %s", (row['id'],))
         return row
@@ -332,8 +333,8 @@ def build_context(conn, event: dict) -> dict:
     }
 
 
-def run_analyze() -> dict:
-    event = claim_event()
+def run_analyze(force: bool = False) -> dict:
+    event = claim_event(force)
     if event is None:
         return {'analyzed': 0, 'reason': 'nothing due'}
     try:

@@ -183,7 +183,7 @@ def mock_extract(article: dict) -> Extraction:
         is_relevant=bool(categories), event_type=event_type, subject=(article.get('headline') or 'event')[:60],
         event_date=published.strftime('%Y-%m-%d'), countries=countries, categories=categories or ['GLOBAL_GEOPOLITICAL'],
         institutions=list(article.get('entities') or []), people=[], assets=list(article.get('assets') or []),
-        metric=event_type.replace('_RELEASE', '').replace('_', ' ').title() if event_type.endswith('_RELEASE') else None,
+        metric=event_type.replace('_RELEASE', '').replace('_', ' ') if event_type.endswith('_RELEASE') else None,
         actual=actual, forecast=forecast, previous=previous, unit='%' if actual is not None else None,
         surprise=surprise, tone='NOT_APPLICABLE', is_market_reaction_coverage=is_reaction,
         importance=int(article.get('importance_prior') or 40), fact_summary=(article.get('headline') or '')[:300])

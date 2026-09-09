@@ -127,7 +127,9 @@
         "GROWTH",
         "INFLATION"
       ],
-      "workflow": "official_data"
+      "workflow": "official_data",
+      "fetch": "http",
+      "note": "apps.bea.gov returns 406 to rss-parser headers; fetched with browser headers and parsed by the XML node"
     },
     {
       "key": "sec_press",
