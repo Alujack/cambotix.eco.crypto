@@ -12,13 +12,17 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from pathlib import Path
 
-from app import ai, briefs, embeddings, intel, pipeline, sources, telegram
-from app.config import (ASSET_UNIVERSE, ai_configured, ai_provider, brief_narrative_enabled, model_for,
-                        ollama_base_url)
+from app import ai, briefs, embeddings, i18n, intel, pipeline, sources, telegram
+from app.config import (ASSET_UNIVERSE, ai_configured, ai_provider, decompose_analysis, anthropic_configured,
+                        brief_narrative_enabled, model_for, ollama_base_url, output_language)
 from app.db import database
 from app.schemas import IngestArticlesRequest, IngestCalendarRequest
 
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s %(name)s %(levelname)s %(message)s')
+# httpx logs every request URL at INFO, which would write the Telegram bot token (it lives in the path) into the
+# container logs on every send. Our own modules log what matters about each call instead.
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 log = logging.getLogger('eco')
 SCHEMA = Path(__file__).resolve().parents[1] / 'db' / '02-schema.sql'
 # Local inference is serial: a tick that arrives while a batch is running returns 'busy' instead of queueing.
@@ -63,12 +67,29 @@ async def unknown_source(request, exc):
 def health():
     with database() as conn:
         conn.execute('SELECT 1')
-    ai_state = {'provider': ai_provider(), 'configured': ai_configured(), 'extractModel': model_for('extract'),
-                'analystModel': model_for('analyst')}
+    # Deliberately local: no outbound calls. The container healthcheck runs this every 10s with a 3s budget, and a
+    # busy local model server made an inline Ollama probe here fail the healthcheck. Reachability is on /ai/status.
+    language = output_language()
+    return {'status': 'ok',
+            'ai': {'provider': ai_provider(), 'configured': ai_configured(), 'extractModel': model_for('extract'),
+                   'analystModel': model_for('analyst'), 'decomposed': decompose_analysis()},
+            'embeddings': {'provider': embeddings.provider(), 'model': embeddings.model_name()},
+            # Delivery language only; stored analysis and this API stay English.
+            'delivery': {'language': language, 'translatesProse': language != 'en' and anthropic_configured()},
+            'trades': False}
+
+
+@app.get('/ai/status', dependencies=[Depends(authorize)])
+def ai_status():
+    """Provider reachability and model presence. Kept off /health because it makes a network call."""
+    language = output_language()
+    state = {'provider': ai_provider(), 'configured': ai_configured(), 'extractModel': model_for('extract'),
+             'analystModel': model_for('analyst'), 'decomposed': decompose_analysis(),
+             'embeddings': {'provider': embeddings.provider(), 'model': embeddings.model_name()},
+             'delivery': {'language': language, 'translatesProse': language != 'en' and anthropic_configured()}}
     if ai_provider() == 'ollama':
-        ai_state.update(ollama_status())
-    return {'status': 'ok', 'ai': ai_state,
-            'embeddings': {'provider': embeddings.provider(), 'model': embeddings.model_name()}, 'trades': False}
+        state.update(ollama_status())
+    return state
 
 
 _OLLAMA_PROBE: dict = {'at': 0.0, 'value': {}}
@@ -145,7 +166,12 @@ def make_daily_brief(brief_date: date | None = None, notify: bool = True):
     with database() as conn:
         brief = briefs.build_daily(conn, brief_date, use_ai)
         briefs.store(conn, brief, pipeline._model_label() if use_ai else None)
-        queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", brief['text'], 'HTML_PRE') if notify else None
+        # English rides in a <pre> block so its columns stay aligned; Khmer and other proportional scripts do not
+        # sit on a character grid, so the localized render is laid out with separators and sent as plain text.
+        lang = output_language()
+        text = brief.get('textLocalized') or brief['text']
+        queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", text,
+                                  'HTML_PRE' if lang == 'en' else None) if notify else None
     brief['telegram'] = telegram.deliver_pending() if queued else {'skipped': 'not configured' if notify else 'notify=false'}
     return brief
 
@@ -164,8 +190,8 @@ def notify_test():
         raise HTTPException(503, 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set')
     stamp = f'{__import__("datetime").datetime.now(__import__("datetime").timezone.utc):%Y-%m-%d %H:%M:%S} UTC'
     with database() as conn:
-        telegram.enqueue(conn, 'test', stamp, '✅ Cambotix Economic Intelligence Engine connected.\n'
-                         'Daily macro brief arrives at 06:00 UTC; high-impact event alerts as they are analyzed.\n' + stamp)
+        telegram.enqueue(conn, 'test', stamp,
+                         i18n.labels(output_language())['telegram_test'] + '\n' + stamp)
     return telegram.deliver_pending()
 
 

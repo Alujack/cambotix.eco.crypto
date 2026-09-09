@@ -23,14 +23,19 @@ def main():
         health = get(base, env['ENGINE_TOKEN'], '/health')
     except (urllib.error.URLError, OSError) as error:
         raise SystemExit(f'Engine not reachable at {base}: {error}')
-    ai = health['ai']
+    ai = get(base, env['ENGINE_TOKEN'], '/ai/status')   # /health stays local; reachability is probed here
     print(f"Engine        {base}  ok   trades={health['trades']}")
     state = 'configured' if ai['configured'] else 'NOT CONFIGURED (set AI_PROVIDER / key)'
     if ai['provider'] == 'ollama':
         state = (f"{ai['ollama']} reachable" + (f", missing models: {', '.join(ai['missingModels'])}" if ai.get('missingModels') else '')
                  if ai.get('reachable') else f"{ai.get('ollama')} NOT REACHABLE ({ai.get('error', '')})")
-    print(f"AI            {ai['provider']}  extract={ai['extractModel']}  analyst={ai['analystModel']}  {state}")
-    print(f"Embeddings    {health['embeddings']['provider']}  {health['embeddings']['model'] or ''}")
+    path = 'decomposed' if ai.get('decomposed') else 'single call'
+    print(f"AI            {ai['provider']}  extract={ai['extractModel']}  analyst={ai['analystModel']} ({path})  {state}")
+    print(f"Embeddings    {ai['embeddings']['provider']}  {ai['embeddings']['model'] or ''}")
+    delivery = health.get('delivery') or {}
+    if delivery.get('language', 'en') != 'en':
+        prose = 'labels + prose' if delivery.get('translatesProse') else 'labels only (prose needs ANTHROPIC_API_KEY)'
+        print(f"Delivery      {delivery['language']}  {prose}  (stored analysis stays English)")
     print(f"n8n editor    http://localhost:{env.get('N8N_PORT', '5681')}")
     tg = get(base, env['ENGINE_TOKEN'], '/notify/status')
     if tg['configured']:

@@ -1,20 +1,25 @@
 """Daily macro brief: deterministic structure, optional model-written narrative, useful even before the first analysis."""
+import logging
 from datetime import date, datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
-from app import ai
-from app.config import ASSET_UNIVERSE, ai_configured, ai_provider, model_for
+from app import ai, grounding, i18n
+from app.config import ASSET_UNIVERSE, ai_configured, ai_provider, model_for, output_language
 from app.intel import LATEST_ANALYSIS, macro_current, upcoming_releases
 from app.macro_state import DIMENSIONS, light
 
+log = logging.getLogger('eco.briefs')
 REGION_ORDER = ['US', 'EU', 'GLOBAL', 'CRYPTO']
 TREND = {'RISING': '↑', 'FALLING': '↓', 'STABLE': '→'}
 RULE = '━' * 26
 
 
 def ai_model_label() -> str:
-    return 'mock' if ai_provider() == 'mock' else f'{ai_provider()}:{model_for("analyst")}'
+    from app.config import decompose_analysis
+    if ai_provider() == 'mock':
+        return 'mock'
+    return f'{ai_provider()}:{model_for("analyst")}' + ('+decomposed' if decompose_analysis() else '')
 
 
 def build_daily(conn, brief_date: date | None = None, use_ai: bool = True) -> dict:
@@ -75,63 +80,127 @@ def build_daily(conn, brief_date: date | None = None, use_ai: bool = True) -> di
                      'extracted24h': stats['extracted_24h'], 'analyzed24h': len(developments), 'aiConfigured': ai_ready,
                      'model': ai_model_label(), 'flagged24h': flagged['flagged'], 'analysesTotal24h': flagged['total']},
     }
-    brief['narrative'] = ai.narrate_brief(brief) if use_ai and developments else None
+    brief['narrative'], brief['narrativeWithheld'] = _narrative(brief, use_ai and bool(developments))
     brief['text'] = render(brief)
+    # Stored and served in English (the trading engines read this); `textLocalized` is what Telegram delivers.
+    lang = output_language()
+    if lang != 'en':
+        brief['textLocalized'] = render(_localized(brief, lang), lang)
     return brief
 
 
-def render(brief: dict) -> str:
+def _localized(brief: dict, lang: str) -> dict:
+    """A copy of the brief whose prose is in `lang`. Headlines, event titles and source names are verbatim source
+    text, so they stay as published; the labels come from app.i18n at render time."""
+    prose = ([brief['narrative']] if brief.get('narrative') else []) + list(brief['keyRisks'])
+    prose += [d['summary'] for d in brief['developments'] if d.get('summary')]
+    delivered = dict(zip(prose, i18n.translate(prose, lang)))
+    return {**brief,
+            'narrative': delivered.get(brief.get('narrative'), brief.get('narrative')),
+            'keyRisks': [delivered.get(risk, risk) for risk in brief['keyRisks']],
+            'developments': [{**d, 'summary': delivered.get(d.get('summary'), d.get('summary'))}
+                             for d in brief['developments']]}
+
+
+def _narrative(brief: dict, use_ai: bool) -> tuple[str | None, list[str] | None]:
+    """Publish model prose only if its specific claims appear in the data it was given."""
+    if not use_ai:
+        return None, None
+    text = ai.narrate_brief(brief)
+    if not text:
+        return None, None
+    ungrounded = grounding.ungrounded_claims(text, brief)
+    if ungrounded:
+        log.warning('narrative withheld: %s not found in the brief data', ', '.join(ungrounded[:8]))
+        return None, ungrounded
+    return text, None
+
+
+def render(brief: dict, lang: str = 'en') -> str:
+    """The brief as delivered text. English keeps the fixed-width column layout (Telegram renders it in a <pre>
+    block); other languages are laid out with separators, because no proportional script sits on a character grid."""
+    L = i18n.labels(lang)
     generated = brief['generatedAt']
     stamp = f'{generated:%H:%M} UTC' if isinstance(generated, datetime) else str(generated)
     pipe = brief['pipeline']
-    lines = [f"🌍 GLOBAL MACRO BRIEF — {brief['date']}  ({stamp})", '',
-             f"Pipeline: {pipe['received24h']} items from {pipe['sources24h']} sources in 24h · {pipe['queued']} queued · "
-             f"{pipe['analyzed24h']} events analyzed · analyst {pipe.get('model', '?')}"]
+    lines = [f"{L['brief_title']} — {brief['date']}  ({stamp})", '',
+             L['pipeline_line'].format(received=pipe['received24h'], sources=pipe['sources24h'], queued=pipe['queued'],
+                                       analyzed=pipe['analyzed24h'], model=pipe.get('model', '?'))]
     if pipe.get('flagged24h'):
-        lines.append(f"⚠ {pipe['flagged24h']}/{pipe['analysesTotal24h']} analyses have self-consistency flags "
-                     f"(GET /analysis-quality) — treat their scores with caution.")
+        lines.append(L['flagged'].format(flagged=pipe['flagged24h'], total=pipe['analysesTotal24h']))
     if not pipe['aiConfigured']:
-        lines.append('AI analysis is OFF — configure AI_PROVIDER (ollama / anthropic) to populate regime, developments and asset pressure.')
-    lines += ['', 'MACRO REGIME', RULE]
+        lines.append(L['ai_off'])
+    lines += ['', L['macro_regime'], RULE]
     known_rows = [(region, dim, v) for region in REGION_ORDER for dim in DIMENSIONS.get(region, [])
                   for v in [brief['macroRegime'].get(region, {}).get(dim)] if v and v['known']]
     if known_rows:
-        for region, dim, v in known_rows:
-            lines.append(f"{light(dim, v['score'])} {region:<7}{dim.replace('_', ' '):<19}{v['state']:<20}{TREND.get(v['trend'], '')} {v['score']:+d}")
+        lines += [_regime_line(region, dim, v, lang) for region, dim, v in known_rows]
         unknown = sum(1 for region in REGION_ORDER for dim in DIMENSIONS.get(region, [])
                       if not brief['macroRegime'].get(region, {}).get(dim, {}).get('known'))
         if unknown:
-            lines.append(f'⚪ {unknown} dimension(s) not yet informed by any analyzed event')
+            lines.append(L['unknown_dims'].format(n=unknown))
     else:
-        lines.append('⚪ No macro state yet — the first analyzed events populate this section.')
-    lines += [f"Risk regime: {brief['riskRegime']}   Global liquidity: {brief['globalLiquidity']}"]
+        lines.append(L['no_macro_state'])
+    lines += [L['risk_liquidity'].format(risk=i18n.state_label('risk_appetite', brief['riskRegime'], lang),
+                                         liquidity=i18n.enum(brief['globalLiquidity'], lang))]
     if brief.get('narrative'):
         lines += ['', brief['narrative']]
-    lines += ['', 'HIGH IMPACT NEXT 48H', RULE]
+    elif brief.get('narrativeWithheld'):
+        lines += ['', L['narrative_withheld'].format(tokens=', '.join(brief['narrativeWithheld'][:4]))]
+    lines += ['', L['upcoming'], RULE]
     highs = [r for r in brief['upcoming'] if r['impact'] == 'HIGH']
-    lines += [f"{_when(r['scheduledAt'])}  {r['currency']:<4}{r['title'][:34]:<35} fcst {r['forecast'] or '—'} · prev {r['previous'] or '—'}"
-              for r in highs] or ['(none scheduled)']
-    lines += ['', 'MAJOR DEVELOPMENTS', RULE]
+    lines += [_release_line(r, lang, L) for r in highs] or [L['none_scheduled']]
+    lines += ['', L['developments'], RULE]
     if brief['developments']:
         lines += [f"{i}. [{d['importance']}] {d['title']}\n   {d['summary']}" for i, d in enumerate(brief['developments'], 1)]
     elif not pipe['aiConfigured']:
-        lines.append('(analysis pending — AI provider not configured)')
+        lines.append(L['analysis_pending'])
     else:
-        lines.append('(no event reached the analysis threshold in the last 24h)')
+        lines.append(L['no_threshold_events'])
     if brief.get('officialHeadlines'):
-        lines += ['', 'OFFICIAL SOURCES (24H)', RULE]
-        lines += [f"{_when(h['publishedAt'])}  {_clip(h['headline'], 70)}  — {h['source'].split(' — ')[0]}" for h in brief['officialHeadlines']]
+        lines += ['', L['official_sources'], RULE]
+        lines += [_headline_line(h, 70, lang) for h in brief['officialHeadlines']]
     if brief.get('topHeadlines'):
-        lines += ['', 'TOP HEADLINES (24H, by keyword signal)', RULE]
-        lines += [f"{_when(h['publishedAt'])}  {_clip(h['headline'], 72)}  — {str(h['source']).split(' — ')[0][:24]}" for h in brief['topHeadlines']]
-    lines += ['', 'ASSET MACRO PRESSURE', RULE]
+        lines += ['', L['top_headlines'], RULE]
+        lines += [_headline_line(h, 72, lang, source_limit=24) for h in brief['topHeadlines']]
+    lines += ['', L['asset_pressure'], RULE]
     if any(brief['assetPressure'].values()):
-        lines += [f"{asset:<8}{score:+d}" for asset, score in brief['assetPressure'].items()]
+        lines += [f'{asset:<8}{score:+d}' if lang == 'en' else f'{asset} {score:+d}'
+                  for asset, score in brief['assetPressure'].items()]
     else:
-        lines.append('(no analyzed events yet — all assets neutral)')
-    lines += ['', 'KEY RISKS', RULE]
-    lines += [f'• {risk}' for risk in brief['keyRisks']] or ['• (none recorded)']
+        lines.append(L['all_neutral'])
+    lines += ['', L['key_risks'], RULE]
+    lines += [f'• {risk}' for risk in brief['keyRisks']] or [f"• {L['none_recorded']}"]
+    if i18n.translation_active(lang):
+        lines += ['', f"({L['machine_translated']})"]
     return '\n'.join(lines)
+
+
+def _regime_line(region: str, dim: str, v: dict, lang: str) -> str:
+    lamp, arrow, name = light(dim, v['score']), TREND.get(v['trend'], ''), i18n.dimension(dim, lang)
+    state = i18n.state_label(dim, v['state'], lang)
+    if lang == 'en':
+        return f"{lamp} {region:<7}{name:<19}{state:<20}{arrow} {v['score']:+d}"
+    return f"{lamp} {region} · {name}៖ {state} {arrow} {v['score']:+d}"
+
+
+def _release_line(release: dict, lang: str, L: dict) -> str:
+    when, forecast, previous = _when(release['scheduledAt'], lang), release['forecast'] or '—', release['previous'] or '—'
+    if lang == 'en':
+        return (f"{when}  {release['currency']:<4}{release['title'][:34]:<35} "
+                f"{L['forecast']} {forecast} · {L['previous']} {previous}")
+    return (f"{when} · {release['currency']} {_clip(release['title'], 48)} · "
+            f"{L['forecast']} {forecast} · {L['previous']} {previous}")
+
+
+def _headline_line(headline: dict, limit: int, lang: str, source_limit: int | None = None) -> str:
+    """Headlines are the source's own words, in the source's own language - only the layout is localized."""
+    source = str(headline['source']).split(' — ')[0]
+    source = source[:source_limit] if source_limit else source
+    when = _when(headline['publishedAt'], lang)
+    if lang == 'en':
+        return f"{when}  {_clip(headline['headline'], limit)}  — {source}"
+    return f"{when} · {_clip(headline['headline'], limit + 18)} — {source}"
 
 
 def _clip(text: str, limit: int) -> str:
@@ -139,9 +208,9 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
 
 
-def _when(value) -> str:
+def _when(value, lang: str = 'en') -> str:
     if isinstance(value, datetime):
-        return f'{value:%a %H:%M}Z'
+        return f'{i18n.weekday(f"{value:%a}", lang)} {value:%H:%M}Z'
     return str(value)[:16]
 
 

@@ -37,14 +37,25 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - `db/02-schema.sql` must stay idempotent: the engine applies it on every start (that is the migration step).
 - Every AI output is validated against `app/schemas.py`; structured-output schemas come from those models.
   Ollama needs `$ref`/`$defs` inlined (`app/ai.inline_refs`) because its decoder takes one flat schema.
-- Model prose is never presented as data: the brief's sections are computed, and the narrative paragraph is gated by
-  `app/config.brief_narrative_enabled` (off for ollama — an 8B model fabricated a BOJ rate hike that was not in its input).
+- Model prose is never presented as data: the brief's sections are computed, and the narrative is published only if
+  `app/grounding.py` finds every proper noun and number in it present in the data the model was given (an 8B model
+  fabricated a BOJ rate hike that was not in its input).
+- The analyst is decomposed for weak models (`app/config.decompose_analysis`, on for ollama): one economic read, then
+  one narrow scoring call per affected asset with a single corrective retry on a sign that contradicts the read.
+  Don't collapse it back into one call for local models — that is what produced all-zero scores and duplicated rationales.
+- Every Ollama call must use the same `num_ctx` (`app/ai.num_ctx`). Ollama keys its loaded instance on it, so a
+  per-stage value reloads the 4.9 GB model between calls and turns a 20 s call into a timeout.
 - Never silently rewrite model output. Disagreements go through `app/consistency.py` as recorded flags, so weak-model
   analyses can be discounted downstream instead of looking authoritative.
 - Local inference is serial: the extract/analyze endpoints hold a lock and return `skipped: busy` rather than queueing.
 - Country codes are normalized to ISO-2 (`app/normalize.normalize_countries`) before they reach a clustering key —
   models write "Canada" as often as "CA" and the event key and array matching depend on one spelling.
 - `US10Y` scores are yield direction (BULLISH = yield up). Scores are -100..100, negative = bearish.
+- `OUTPUT_LANGUAGE` (`en` default, `km` Khmer) changes **delivered text only** — Telegram messages and the rendered
+  brief. The database, the intelligence API and `app/grounding.py` stay English: the trading engines read that API,
+  and the groundedness gate matches capitalised proper nouns, which Khmer has none of. Labels come from the static
+  tables in `app/i18n.py` (translate `state_label` by position — `TIGHT` differs per dimension); prose is translated
+  by one `TRANSLATE_MODEL` call and falls back to English per segment. Headlines and titles stay in the source's words.
 
 ## Glossary
 - article: one collected item (`raw_articles`), deduped by `content_hash`
@@ -54,3 +65,4 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - asset impact: per-event, per-asset, per-horizon score (immediate 0-4h, short 1-5d, medium 2-8w)
 - reaction: what the market actually did at 5m/15m/1h/4h/24h vs the expected direction
 - notification: one outbox row (`notifications`) per Telegram message: brief, event_alert or test
+- delivery language: the language of the text Telegram receives (`app/i18n.py`); English remains the storage language

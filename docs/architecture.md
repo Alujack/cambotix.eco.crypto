@@ -19,7 +19,8 @@ the model's job, in two stages so the expensive model only ever sees clustered e
 | Normalize, hash, dedupe, priors | `app/pipeline.ingest_articles` | on POST |
 | Extract facts | `app/pipeline.run_extract` (`ai.extract`) | n8n `eco08` every 30 s, batch 3 |
 | Cluster into events | `app/clustering.find_event` | inside extract |
-| Analyze | `app/pipeline.run_analyze` (`ai.analyze`) + `consistency.check` | n8n `eco09` every 60 s, one event per tick |
+| Analyze | `app/pipeline.run_analyze` → `ai.read_event` + `ai.score_asset` per affected asset (or one call for
+Opus-class models) + `consistency.check` | n8n `eco09` every 60 s, one event per tick |
 | Macro-state update | `app/macro_state.apply_updates` | inside analyze, same transaction |
 | Reaction anchors | `app/reactions.open_windows` | inside analyze (first version only) |
 | Reaction measurement | `app/reactions.measure_due` | n8n `eco10` every 5 min |
@@ -72,6 +73,12 @@ decoding, `temperature 0`), which needs `$defs` inlined first; `anthropic` uses 
 thinking and server-side refusal fallbacks. Adding a provider means one `_call_*` function and a branch in
 `ai.extract` / `ai.analyze` / `ai.narrate_brief` — nothing downstream knows which model ran, beyond the `model`
 column on `event_analysis`.
+
+Stage 2 is decomposed when `decompose_analysis()` is true (default for ollama): `ai.read_event` produces the
+judgement and the list of affected assets, then `ai.score_asset` scores each one in its own call with that asset's
+prior and the read in front of the model. Two bounded retries exist, each stating the problem rather than editing the
+answer: a summary that restates the event, and a score whose sign contradicts the model's own risk regime. A single
+asset failing is logged and omitted rather than losing the read.
 
 Because model strength varies, `app/consistency.py` records where an analysis disagrees with itself instead of
 trusting or rewriting it: sign against the stated risk regime, zero scores under a directional rationale, one

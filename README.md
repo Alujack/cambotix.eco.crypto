@@ -57,25 +57,43 @@ docker compose up -d engine          # EXTRACT_MODEL / ANALYST_MODEL fall back t
 
 ### Local-model throughput and quality
 
-Measured on an M1 Pro / 16 GB with `llama3.1:8b`: **~25 s per article** for extraction, **~2 min per event** for
-analysis. That comfortably outpaces arrivals (~15 articles/hour from the current feed set). Local inference is serial,
+> **One context size, always.** Ollama keys its loaded model instance on `num_ctx`, so varying it per call stage makes
+> it unload and reload the whole 4.9 GB model between calls. That turned a 20-second scoring call into a 300-second
+> timeout on 16 GB. `OLLAMA_NUM_CTX` (default 16384) is used by every call for this reason — don't make it per-stage.
+
+Measured on an M1 Pro / 16 GB with `llama3.1:8b`: **~25 s per article** for extraction, **~20 s per scoring call**
+and **~2.5 min per event** for a decomposed analysis. That comfortably outpaces arrivals (~15 articles/hour from the current feed set). Local inference is serial,
 so `/process/extract` and `/process/analyze` hold a lock and answer `{"skipped": "busy"}` if a tick arrives while a
 previous one is still running — the n8n executions stay green.
 
-One thing is off by default because of this: the brief's **model-written narrative paragraph**. Running locally,
-llama3.1:8b produced a fluent paragraph that asserted "the BOJ's decision to hike rates" — an event that appeared
-nowhere in its input. A fabricated macro fact delivered to Telegram as fact is worse than no paragraph, so the
-narrative is on for `anthropic`/`mock` and **off for `ollama`** unless you set `BRIEF_USE_AI=true`. Every other
-section of the brief is computed from the database and never depends on model prose.
+A single call asked to fill the whole nested `Analysis` schema is where a small model falls apart: llama3.1:8b
+hedged every asset score to 0, reused one rationale for eight assets, and called an event risk-off while scoring
+equities bullish. So for local models the analyst is **decomposed** (`ANALYST_DECOMPOSE`, on by default for
+`ollama`), applying the same "no giant AI node" principle inside stage 2:
 
-Quality is the real trade-off. An 8B model reliably produces schema-valid output and decent fact extraction, but its
-economic reasoning is shallower than the Opus-class analyst this pipeline was designed around, and it sometimes
-contradicts itself (calling an event risk-off while scoring equities bullish). The engine therefore **measures** that
-rather than hiding it: every analysis is checked for self-consistency and the flags are stored, surfaced in
-`GET /analysis-quality`, `scripts/status.py` and the daily brief. Observed flag codes are `risk_regime_sign`
-(sign disagrees with the stated risk regime), `zero_with_direction` (a directional rationale scored 0),
-`duplicate_rationale` and `summary_repeats_event`. Use that endpoint to decide whether a local model is good enough
-for a given job, or to compare models — `ANALYST_MODEL` is the only thing that has to change.
+1. **Economic read** — one call for the judgement with no per-asset numbers: interpretation, central-bank lean, risk
+   regime, causal chain, macro-state nudges, and *which* assets the event actually moves. Retried once if the
+   summary merely restates the event.
+2. **Per-asset scoring** — one narrow call per affected asset, given the read and that asset's prior from
+   `economic_asset_map`, returning just three horizon scores and a rationale for that asset. If a score contradicts
+   the model's own risk-regime call, it is retried once with the contradiction stated; the retry is kept only if it
+   resolves the conflict or explains itself.
+
+Measured on the same tariff event: the single call produced 8 assets, 3 consistency flags and bullish equities under
+a risk-off read; decomposed it produced 2 assets, coherent signs and **0 flags**, in ~2.5 min. Opus-class models keep
+the single call (faster, and they handle the full schema).
+
+Whatever the provider, disagreements are still **measured rather than hidden**: `app/consistency.py` checks every
+analysis and stores flags (`risk_regime_sign`, `zero_with_direction`, `duplicate_rationale`,
+`summary_repeats_event`), surfaced in `GET /analysis-quality`, `scripts/status.py` and the daily brief. Nothing
+rewrites model output — a retry asks again with the problem named; an unresolved disagreement is recorded, not
+smoothed over.
+
+**Model prose is never published unchecked.** llama3.1:8b wrote a fluent brief paragraph asserting "the BOJ's
+decision to hike rates" — an event nowhere in its input. `app/grounding.py` now verifies that every proper noun and
+number in the narrative appears in the data the model was given; if not, the paragraph is withheld and the brief says
+so. The narrative is therefore enabled for every provider, and safe because it is checked rather than trusted
+(`BRIEF_USE_AI=false` disables it outright). Every other section is computed from the database.
 
 ```bash
 python3 scripts/status.py           # health, sources delivering, macro state, newest events
@@ -126,6 +144,7 @@ next start. Back up `.env` with the volumes — the encryption key is needed to 
    official-source items and the top headlines of the day by keyword signal, asset pressure and risks; the narrative
    paragraph is model-written when a key is configured. Telegram receives it as a fixed-width block.
    Briefs and high-importance alerts are delivered to Telegram through the `notifications` outbox (workflow 12 retries).
+   `OUTPUT_LANGUAGE` picks the language of that delivered text (see below); storage stays English.
 
 ### Asset universe and scoring
 
@@ -148,6 +167,31 @@ regulation or exchange failures). Messages go through the `notifications` outbox
 workflow **Eco 12** retries anything pending every minute (`POST /notify/flush`). `GET /notify/status` and
 `scripts/status.py` show sent/pending/failed counts; `POST /briefs/daily` re-sends today's brief.
 
+### Delivery language
+
+`OUTPUT_LANGUAGE=km` delivers the Telegram brief and the event alerts in Khmer (`en` is the default; an unsupported
+value falls back to `en`). Only the delivered text moves — `raw_articles`, `event_analysis`, `briefs.text` and every
+`/intel` response stay English, because the gold/forex/crypto engines consume that API and the groundedness gate reads
+English prose. `GET /health` reports `delivery.language`.
+
+Two layers, deliberately different in kind:
+
+- **labels** — headings, field names, macro-state vocabulary and the analyst's enums come from static tables in
+  `app/i18n.py`. No model involved, so there is nothing to invent. `state_label` translates *by position* in the
+  dimension's vocabulary: `TIGHT` is a tight labour market for `employment` and a squeeze for `liquidity`.
+- **prose** — the engine's own model-written text (brief narrative, event summaries, key risks, causal chain) goes
+  through one `TRANSLATE_MODEL` call (`claude-haiku-4-5`) per message, cached in-process. This needs
+  `ANTHROPIC_API_KEY` **whatever `AI_PROVIDER` is**: llama3.1:8b is not good enough at Khmer to publish. Without a
+  key, or if the call fails, labels are still translated and each prose segment falls back to its English text.
+
+Headlines, event titles and source names are delivered in the source's own words — they are quotations, not engine
+output. The Khmer brief is sent as plain text rather than a `<pre>` block: no proportional script sits on a character
+grid, so the localized render uses separators instead of column padding.
+
+**The groundedness gate stays English on purpose.** `app/grounding.py` finds a model's claims by matching capitalised
+proper nouns, which Khmer script does not have — a Khmer narrative would pass it blind. So the narrative is gated in
+English (`app/briefs._narrative`) and translated only on the way out.
+
 ## Intelligence API
 
 All routes except `/health` need the header `X-Eco-Token: <ENGINE_TOKEN>` (from `.env`). Bound to 127.0.0.1:8020.
@@ -162,7 +206,7 @@ All routes except `/health` need the header `X-Eco-Token: <ENGINE_TOKEN>` (from 
 | `GET /analysis/{asset}` | Decay-weighted bias, contributing events with rationale, reaction scorecard |
 | `GET /briefs/latest?format=text` | Newest daily brief |
 | `GET /sources` | Registry with article counts |
-| `GET /analysis-quality?days=7` | Analyses, self-consistency flags and average confidence per model |
+| `GET /analysis-quality?days=7` | Analyses, self-consistency flags and average confidence per model — the measurement to consult before trusting a local model's scores |
 | `GET /notify/status`, `POST /notify/flush`, `POST /notify/test` | Telegram outbox |
 | `POST /ingest/articles`, `/ingest/calendar` | Called by n8n collectors |
 | `POST /process/extract?batch=5`, `/process/analyze?force=false`, `/process/reactions`, `/briefs/daily` | Called by n8n schedulers; `force=true` skips the coverage debounce for a manual run |
@@ -171,8 +215,8 @@ All routes except `/health` need the header `X-Eco-Token: <ENGINE_TOKEN>` (from 
 
 ```text
 app/            FastAPI engine: pipeline.py (write path), intel.py (read models), ai.py (Ollama + Claude + mock),
-                clustering.py, consistency.py, macro_state.py, reactions.py, briefs.py, telegram.py, normalize.py,
-                schemas.py, prompts.py, embeddings.py
+                clustering.py, consistency.py, grounding.py, macro_state.py, reactions.py, briefs.py, telegram.py,
+                normalize.py, i18n.py (delivery language), schemas.py, prompts.py, embeddings.py
 db/             01-databases.sql (n8n db), 02-schema.sql (engine schema + seeds)
 sources/        registry.json — the source registry (reliability, priority, workflow group)
 n8n/            generated workflow templates (eco01…eco11), committed for review

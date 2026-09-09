@@ -11,9 +11,10 @@ from pydantic import BaseModel
 
 import httpx
 
-from app.config import ai_provider, anthropic_configured, env, env_int, model_for, ollama_base_url
-from app.prompts import ANALYST_SYSTEM, BRIEF_SYSTEM, EXTRACTOR_SYSTEM
-from app.schemas import Analysis, Extraction
+from app.config import (ai_provider, anthropic_configured, decompose_analysis, env, env_int, model_for,
+                        ollama_base_url, translate_model)
+from app.prompts import ANALYST_SYSTEM, BRIEF_SYSTEM, EXTRACTOR_SYSTEM, READ_SYSTEM, SCORE_SYSTEM, TRANSLATE_SYSTEM
+from app.schemas import Analysis, AssetScore, EconomicRead, Extraction, Translation
 
 log = logging.getLogger('eco.ai')
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
@@ -67,16 +68,25 @@ def inline_refs(schema: dict) -> dict:
     return walk(schema)
 
 
-def _call_ollama(model: type[M], model_id: str, system: str, user: str, num_ctx: int, num_predict: int) -> M:
+def num_ctx() -> int:
+    """One context size for every chat call. Ollama keys its loaded instance on num_ctx, so varying it per stage
+    unloads and reloads the model between calls - on a 16 GB machine that turned a 10 s scoring call into a 5 min
+    timeout."""
+    return env_int('OLLAMA_NUM_CTX', 16384)
+
+
+def _call_ollama(model: type[M], model_id: str, system: str, user: str, num_predict: int) -> M:
     schema = inline_refs(strict_schema(model))
     payload = {'model': model_id, 'stream': False, 'format': schema, 'keep_alive': '30m',
-               'options': {'temperature': 0, 'num_ctx': num_ctx, 'num_predict': num_predict},
+               'options': {'temperature': 0, 'num_ctx': num_ctx(), 'num_predict': num_predict},
                'messages': [{'role': 'system', 'content': system},
                             {'role': 'user', 'content': user + '\n\nRespond with one JSON object that matches the schema; '
                                                             'no prose before or after it.'}]}
     try:
         with httpx.Client(timeout=float(env_int('AI_TIMEOUT_SECONDS', 300))) as client:
             response = client.post(ollama_base_url() + '/api/chat', json=payload)
+    except httpx.TimeoutException as error:
+        raise AIError(f'ollama timed out after {env_int("AI_TIMEOUT_SECONDS", 300)}s ({model_id}): {error}') from error
     except httpx.HTTPError as error:
         raise AIError(f'ollama unreachable at {ollama_base_url()}: {error}') from error
     if response.status_code == 404 and 'not found' in response.text:
@@ -157,18 +167,94 @@ def extract(article: dict) -> Extraction:
                           'countries': article.get('countries')},
     }, default=str)
     if ai_provider() == 'ollama':
-        return _call_ollama(Extraction, model_for('extract'), EXTRACTOR_SYSTEM, user, num_ctx=8192, num_predict=1500)
+        return _call_ollama(Extraction, model_for('extract'), EXTRACTOR_SYSTEM, user, num_predict=1500)
     return _call_anthropic(Extraction, model_for('extract'), EXTRACTOR_SYSTEM, user, max_tokens=2048, reasoning=False)
+
+
+# Under RISK_OFF these assets normally fall and havens rise; the reverse under RISK_ON. Used to catch a score that
+# contradicts the model's own regime call, and to phrase the corrective retry.
+RISK_ASSETS = {'SPX', 'NASDAQ', 'BTC', 'ETH'}
+HAVEN_ASSETS = {'XAUUSD'}
+
+
+def _sign_conflict(asset: str, regime: str, score: int) -> str | None:
+    if abs(score) <= 15:
+        return None
+    if regime == 'RISK_OFF' and asset in RISK_ASSETS and score > 0:
+        return f'you judged this event RISK_OFF, but scored {asset} {score:+d} (a gain for a risk asset)'
+    if regime == 'RISK_ON' and asset in RISK_ASSETS and score < 0:
+        return f'you judged this event RISK_ON, but scored {asset} {score:+d} (a loss for a risk asset)'
+    if regime == 'RISK_OFF' and asset in HAVEN_ASSETS and score < 0:
+        return f'you judged this event RISK_OFF, but scored the haven {asset} {score:+d}'
+    return None
+
+
+def _call(model, model_id, system, user, *, num_predict, max_tokens, reasoning):
+    if ai_provider() == 'ollama':
+        return _call_ollama(model, model_id, system, user, num_predict=num_predict)
+    return _call_anthropic(model, model_id, system, user, max_tokens=max_tokens, reasoning=reasoning)
+
+
+def read_event(context: dict) -> EconomicRead:
+    """Stage 2a. Retried once if the summary just restates the event, which a small model does when rushed."""
+    model_id = model_for('analyst')
+    user = json.dumps(context, default=str)
+    read = _call(EconomicRead, model_id, READ_SYSTEM, user, num_predict=2048, max_tokens=8000, reasoning=True)
+    if read.summary.strip().lower() in {read.what_happened.strip().lower(), str(context.get('event', {}).get('title', '')).strip().lower()}:
+        log.info('read summary restated the event; retrying once with that pointed out')
+        read = _call(EconomicRead, model_id, READ_SYSTEM,
+                     user + f'\n\nYour previous answer used "{read.summary}" as the summary, which merely restates the '
+                            'event. Write a summary that says what it MEANS instead.',
+                     num_predict=2048, max_tokens=8000, reasoning=True)
+    return read
+
+
+def score_asset(read: EconomicRead, asset: str, event: dict, priors: list[dict]) -> AssetScore:
+    """Stage 2b. One asset per call, with a single corrective retry when the sign contradicts the regime call."""
+    model_id = model_for('analyst')
+    payload = {
+        'asset': asset,
+        'event': {'title': event.get('title'), 'type': event.get('type'), 'facts': event.get('facts'),
+                  'importance': event.get('importance')},
+        'economic_read': {'summary': read.summary, 'why_it_matters': read.why_it_matters,
+                          'economic_interpretation': read.economic_interpretation.model_dump(),
+                          'central_bank_implication': read.central_bank_implication.model_dump(),
+                          'risk_regime_impact': read.risk_regime_impact, 'causal_chain': read.causal_chain,
+                          'horizon': read.horizon, 'confidence': read.confidence},
+        'database_prior_for_this_asset': [p for p in priors if p.get('asset') == asset],
+    }
+    user = json.dumps(payload, default=str)
+    score = _call(AssetScore, model_id, SCORE_SYSTEM, user, num_predict=700, max_tokens=2048, reasoning=False)
+    conflict = _sign_conflict(asset, read.risk_regime_impact, score.immediate.score)
+    if conflict:
+        log.info('%s score contradicts the regime call; retrying once (%s)', asset, conflict)
+        retry = _call(AssetScore, model_id, SCORE_SYSTEM,
+                      user + f'\n\nYour previous answer is inconsistent: {conflict}. Either correct the sign, or keep '
+                             'it and state explicitly in the rationale why this asset moves against the risk regime.',
+                      num_predict=700, max_tokens=2048, reasoning=False)
+        # Keep the retry only if it resolved the conflict or explained itself; otherwise the flag records the problem.
+        if not _sign_conflict(asset, read.risk_regime_impact, retry.immediate.score) or len(retry.rationale) > len(score.rationale):
+            score = retry
+    return score
 
 
 def analyze(context: dict) -> Analysis:
     if ai_provider() == 'mock':
         return mock_analyze(context)
-    if ai_provider() == 'ollama':
-        return _call_ollama(Analysis, model_for('analyst'), ANALYST_SYSTEM, json.dumps(context, default=str),
-                            num_ctx=16384, num_predict=4096)
-    return _call_anthropic(Analysis, model_for('analyst'), ANALYST_SYSTEM, json.dumps(context, default=str),
-                           max_tokens=16000, reasoning=True)
+    if not decompose_analysis():
+        return _call(Analysis, model_for('analyst'), ANALYST_SYSTEM, json.dumps(context, default=str),
+                     num_predict=4096, max_tokens=16000, reasoning=True)
+    read = read_event(context)
+    priors = context.get('economic_asset_map') or []
+    event = context.get('event') or {}
+    scores: dict[str, AssetScore] = {}
+    for asset in dict.fromkeys(read.affected_assets):
+        try:
+            scores[asset] = score_asset(read, asset, event, priors)
+        except (AIError, ValueError) as error:
+            # One asset failing must not lose the whole read.
+            log.warning('scoring %s failed, omitting it: %s', asset, error)
+    return Analysis.assemble(read, scores)
 
 
 def narrate_brief(brief: dict) -> str | None:
@@ -176,7 +262,7 @@ def narrate_brief(brief: dict) -> str | None:
         return None
     if ai_provider() == 'ollama':
         payload = {'model': model_for('analyst'), 'stream': False, 'keep_alive': '30m',
-                   'options': {'temperature': 0.3, 'num_ctx': 16384, 'num_predict': 500},
+                   'options': {'temperature': 0.3, 'num_ctx': num_ctx(), 'num_predict': 500},
                    'messages': [{'role': 'system', 'content': BRIEF_SYSTEM},
                                 {'role': 'user', 'content': json.dumps(brief, default=str)}]}
         try:
@@ -200,6 +286,21 @@ def narrate_brief(brief: dict) -> str | None:
     if response.stop_reason == 'refusal':
         return None
     return next((block.text.strip() for block in response.content if block.type == 'text'), None)
+
+
+def translate(texts: list[str], language: str) -> list[str] | None:
+    """Engine prose in the delivery language, or None when translation is unavailable - the caller then ships English.
+
+    Anthropic only, whatever AI_PROVIDER is: this is a display step over text that has already been validated and
+    stored in English, and the local 8B models are not good enough at the target languages to publish.
+    """
+    if not texts or ai_provider() == 'mock' or not anthropic_configured():
+        return None
+    user = json.dumps({'target_language': language, 'texts': texts}, ensure_ascii=False)
+    # Khmer and other non-Latin scripts cost several tokens per cluster, so budget generously off the input length.
+    budget = min(16384, max(2048, 4 * sum(len(text) for text in texts)))
+    result = _call_anthropic(Translation, translate_model(), TRANSLATE_SYSTEM, user, budget, reasoning=False)
+    return result.texts
 
 
 # ---- offline mock -----------------------------------------------------------------------------------------------

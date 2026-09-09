@@ -410,8 +410,11 @@ def run_analyze(force: bool = False) -> dict:
 
 
 def _model_label() -> str:
-    from app.config import ai_provider, model_for
-    return 'mock' if ai_provider() == 'mock' else f'{ai_provider()}:{model_for("analyst")}'
+    """Includes the analyst path so /analysis-quality compares a decomposed run against a single-call one."""
+    from app.config import ai_provider, decompose_analysis, model_for
+    if ai_provider() == 'mock':
+        return 'mock'
+    return f'{ai_provider()}:{model_for("analyst")}' + ('+decomposed' if decompose_analysis() else '')
 
 
 def _release_event(event: dict, seconds: int, error: str) -> None:

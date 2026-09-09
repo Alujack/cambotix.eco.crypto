@@ -28,3 +28,19 @@ def test_pre_chunks_are_wrapped_and_escaped():
     assert all(p.startswith('<pre>') and p.endswith('</pre>') and len(p) <= 3900 for p in parts)
     assert '&lt;b&gt; &amp;' in parts[0] and '<b>' not in parts[0]
     assert render_chunks('plain', None) == ['plain']
+
+
+def test_bot_token_never_reaches_the_logs(caplog, monkeypatch):
+    """httpx logs request URLs at INFO and the token lives in the Telegram URL path."""
+    import logging
+
+    import app.telegram as telegram_module
+    assert logging.getLogger('httpx').level >= logging.WARNING
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', '123456:SUPERSECRETVALUE')
+    monkeypatch.setenv('TELEGRAM_CHAT_ID', '42')
+    with caplog.at_level(logging.DEBUG):
+        try:
+            telegram_module.send('hello')
+        except telegram_module.TelegramError:
+            pass
+    assert 'SUPERSECRETVALUE' not in caplog.text

@@ -135,3 +135,17 @@ def test_interrupted_claims_are_swept_back(client):
     with database() as conn:
         conn.execute("UPDATE economic_events SET status='analyzing', next_attempt_at=now()")
     assert claim_event() is None, 'a fresh claim must not be stolen'
+
+
+def test_health_makes_no_outbound_call(client, monkeypatch):
+    """The container healthcheck runs /health every 10s with a 3s budget: a probe here fails it when the model is busy."""
+    import app.main as main_module
+
+    def explode(*args, **kwargs):
+        raise AssertionError('/health must not make a network call')
+    monkeypatch.setattr(main_module, 'ollama_status', explode)
+    monkeypatch.setenv('AI_PROVIDER', 'ollama')
+    body = client.get('/health').json()
+    assert body['status'] == 'ok' and body['ai']['provider'] == 'ollama' and 'reachable' not in body['ai']
+    monkeypatch.setattr(main_module, 'ollama_status', lambda: {'ollama': 'http://x', 'reachable': True, 'missingModels': []})
+    assert client.get('/ai/status', headers=HEADERS).json()['reachable'] is True

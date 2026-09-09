@@ -2,6 +2,7 @@
 import os
 
 ASSET_UNIVERSE = ['USD', 'EURUSD', 'XAUUSD', 'BTC', 'ETH', 'SPX', 'NASDAQ', 'US10Y', 'OIL']
+SUPPORTED_LANGUAGES = {'en', 'km'}
 CATEGORIES = ['INFLATION', 'EMPLOYMENT', 'GROWTH', 'MONETARY_POLICY', 'GLOBAL_GEOPOLITICAL', 'CRYPTO']
 MEDIA_SOURCE_CATEGORIES = {'financial_media', 'crypto_media'}
 
@@ -50,14 +51,41 @@ def ai_configured() -> bool:
     return provider in ('ollama', 'mock')
 
 
+def decompose_analysis() -> bool:
+    """Split the analyst into a small economic read plus one narrow call per affected asset.
+
+    A single call filling the whole nested Analysis schema is where an 8B model fell down: it hedged every score to
+    zero, reused one rationale for eight assets and contradicted its own risk-regime call. Decomposed, each call has
+    one job. Opus-class models handle the full schema in one pass, so they keep the single call (faster, cheaper).
+    """
+    explicit = env('ANALYST_DECOMPOSE')
+    if explicit:
+        return explicit.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return ai_provider() == 'ollama'
+
+
 def brief_narrative_enabled() -> bool:
-    """The brief's data sections are deterministic; the narrative is model prose. An 8B local model was observed
-    inventing an event that was not in its input ("the BOJ's decision to hike rates"), so the narrative is opt-in
-    for ollama and on by default only where the model is strong enough to stay grounded."""
+    """The brief's data sections are deterministic; the narrative is model prose. A local model was observed inventing
+    an event that was not in its input ("the BOJ's decision to hike rates"), so narrative prose is checked for
+    groundedness (app.grounding) before it is published, whichever provider wrote it."""
     explicit = env('BRIEF_USE_AI')
     if explicit:
         return explicit.strip().lower() in {'1', 'true', 'yes', 'on'}
-    return ai_provider() != 'ollama'
+    return True
+
+
+def output_language() -> str:
+    """Language of the *delivered* text (Telegram messages, the rendered brief). Storage stays English: the database,
+    the intelligence API and app.grounding all read English, and the gold/forex/crypto engines consume that API.
+    An unsupported value falls back to English rather than shipping half-translated text."""
+    value = env('OUTPUT_LANGUAGE', 'en').strip().lower() or 'en'
+    return value if value in SUPPORTED_LANGUAGES else 'en'
+
+
+def translate_model() -> str:
+    """Translation is a delivery step, not analysis, so it has its own small model and ignores AI_PROVIDER: the local
+    8B models are not good enough at Khmer to publish, and prose falls back to English without an Anthropic key."""
+    return env('TRANSLATE_MODEL') or 'claude-haiku-4-5'
 
 
 def model_for(stage: str) -> str:

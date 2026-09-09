@@ -101,6 +101,13 @@ class Extraction(StrictModel):
     fact_summary: str = Field(description='One sentence, facts only, no interpretation.')
 
 
+# ---- delivery: display-language translation --------------------------------------------------------------------
+class Translation(StrictModel):
+    """Display-language rendering of engine prose, one output per input, in order. Never stored: the database and the
+    intelligence API keep the English text (app.i18n)."""
+    texts: list[str]
+
+
 # ---- stage 2: economic analyst (reasoning model) --------------------------------------------------------------
 Direction3 = Literal['BULLISH', 'BEARISH', 'NEUTRAL']
 
@@ -146,6 +153,35 @@ class MacroStateUpdate(StrictModel):
     reason: str
 
 
+class EconomicRead(StrictModel):
+    """Stage 2a: the economic judgement, with no per-asset numbers. Small enough for a local model to fill well."""
+    summary: str = Field(description='Two sentences of analysis a portfolio manager would read first. Never the headline.')
+    what_happened: str
+    why_it_matters: str
+    what_changed_vs_expectations: str
+    is_new_information: bool
+    economic_interpretation: EconomicInterpretation
+    central_bank_implication: CentralBankImplication
+    risk_regime_impact: Literal['RISK_ON', 'RISK_OFF', 'NEUTRAL']
+    causal_chain: list[str] = Field(description='3-7 steps from the event to the asset pressure.')
+    relation_to_trend: Literal['CONFIRMS', 'CONTRADICTS', 'MIXED', 'NEW_THEME']
+    horizon: Literal['IMMEDIATE', 'SHORT_TERM', 'MEDIUM_TERM', 'LONG_TERM']
+    evidence_strength: Literal['STRONG', 'MODERATE', 'WEAK']
+    confidence: int = Field(ge=0, le=100)
+    affected_assets: list[Asset] = Field(description='Only the assets this event genuinely moves. Leave out the rest; '
+                                                     'an event with no clear asset channel may list none.')
+    macro_state_updates: list[MacroStateUpdate]
+    key_risks: list[str]
+
+
+class AssetScore(StrictModel):
+    """Stage 2b: one asset, scored on its own so the model reasons about a single channel at a time."""
+    immediate: HorizonImpact
+    short_term: HorizonImpact
+    medium_term: HorizonImpact
+    rationale: str = Field(description='The mechanism for THIS asset, in one or two sentences of its own.')
+
+
 class Analysis(StrictModel):
     summary: str = Field(description='Two sentences a portfolio manager would read first.')
     what_happened: str
@@ -163,6 +199,14 @@ class Analysis(StrictModel):
     asset_impacts: list[AssetImpact] = Field(description='One entry per asset in the universe that is affected.')
     macro_state_updates: list[MacroStateUpdate]
     key_risks: list[str]
+
+    @classmethod
+    def assemble(cls, read: 'EconomicRead', scores: dict[str, AssetScore]) -> 'Analysis':
+        """Build the stored shape from the decomposed stages, so nothing downstream knows which path produced it."""
+        return cls(**read.model_dump(exclude={'affected_assets'}),
+                   asset_impacts=[AssetImpact(asset=asset, immediate=score.immediate, short_term=score.short_term,
+                                              medium_term=score.medium_term, rationale=score.rationale)
+                                  for asset, score in scores.items()])
 
     @model_validator(mode='after')
     def _one_impact_per_asset(self):

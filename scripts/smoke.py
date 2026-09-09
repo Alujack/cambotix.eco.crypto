@@ -40,8 +40,11 @@ def start_engine(env):
     sh('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'eco', '-d', DB, '-v', 'ON_ERROR_STOP=1', '-q',
        stdin=(ROOT / 'db' / '02-schema.sql').read_text())
     url = f"postgresql://eco:{env['POSTGRES_PASSWORD']}@postgres:5432/{DB}"
+    # OUTPUT_LANGUAGE=en keeps the run offline and its assertions deterministic: a Khmer delivery would call out to
+    # the translation model. The localized render is covered by tests/test_i18n.py instead.
     container = sh('docker', 'compose', 'run', '-d', '--rm', '--no-deps', '-e', 'AI_PROVIDER=mock', '-e', 'EMBEDDINGS_PROVIDER=none',
-                   '-e', f'ECO_DATABASE_URL={url}', '-p', f'127.0.0.1:{PORT}:8000', 'engine').stdout.strip()
+                   '-e', 'OUTPUT_LANGUAGE=en', '-e', f'ECO_DATABASE_URL={url}', '-p', f'127.0.0.1:{PORT}:8000',
+                   'engine').stdout.strip()
     base = f'http://127.0.0.1:{PORT}'
     for _ in range(60):
         try:

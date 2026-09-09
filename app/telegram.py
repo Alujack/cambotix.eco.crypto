@@ -5,10 +5,14 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app.config import env
+from app import i18n
+from app.config import env, output_language
 from app.db import database
 
 log = logging.getLogger('eco.telegram')
+# Belt and braces: this module builds URLs containing the bot token, so silence httpx here too even when the app's
+# logging setup in main.py has not run (tests, ad-hoc scripts).
+logging.getLogger('httpx').setLevel(logging.WARNING)
 CHUNK = 3900  # Telegram caps a message at 4096 characters
 MAX_ATTEMPTS = 5
 
@@ -116,29 +120,41 @@ def status(conn) -> dict:
             'lastSent': last['sent_at'] if last else None, 'lastKind': last['kind'] if last else None}
 
 
-def format_event_alert(event: dict, analysis, article_count: int | None = None) -> str:
-    """HTML alert for one analyzed event. Everything user-derived is escaped."""
-    esc = html.escape
+def format_event_alert(event: dict, analysis, article_count: int | None = None, lang: str | None = None) -> str:
+    """HTML alert for one analyzed event. Everything user-derived is escaped; the title stays in the source's words."""
+    lang = lang or output_language()
+    L, esc = i18n.labels(lang), html.escape
     light = '🔴' if event['importance'] >= 90 else '🟠' if event['importance'] >= 80 else '🟡'
     interp = analysis.economic_interpretation
     cb = analysis.central_bank_implication
-    reads = [f'Inflation {interp.inflation}', f'Growth {interp.growth}', f'Liquidity {interp.liquidity}']
+    reads = [f"{L['read_inflation']} {i18n.enum(interp.inflation, lang)}",
+             f"{L['read_growth']} {i18n.enum(interp.growth, lang)}",
+             f"{L['read_liquidity']} {i18n.enum(interp.liquidity, lang)}"]
     if cb.fed != 'NOT_RELEVANT':
-        reads.append(f'Fed {cb.fed}')
+        reads.append(f'Fed {i18n.enum(cb.fed, lang)}')
     if cb.ecb != 'NOT_RELEVANT':
-        reads.append(f'ECB {cb.ecb}')
-    reads.append(f'Risk {analysis.risk_regime_impact}')
+        reads.append(f'ECB {i18n.enum(cb.ecb, lang)}')
+    reads.append(f"{L['read_risk']} {i18n.enum(analysis.risk_regime_impact, lang)}")
     impacts = ' · '.join(f'{i.asset} {i.immediate.score:+d}/{i.short_term.score:+d}'
                          for i in sorted(analysis.asset_impacts, key=lambda i: -abs(i.immediate.score))[:6])
-    lines = [f"{light} <b>{esc(event['title'])}</b>  (importance {event['importance']})", '', esc(analysis.summary), '',
+    # One translation call for the whole alert; each segment falls back to its English text on failure.
+    prose = i18n.translate([analysis.summary] + list(analysis.causal_chain[:5]), lang)
+    summary, chain = prose[0], prose[1:]
+    lines = [f"{light} <b>{esc(event['title'])}</b>  ({L['importance']} {event['importance']})", '', esc(summary), '',
              esc(' · '.join(reads))]
     if impacts:
-        lines += [f'<b>Impact now/1-5d:</b> {esc(impacts)}']
-    if analysis.causal_chain:
-        lines += ['<b>Chain:</b> ' + esc(' → '.join(analysis.causal_chain[:5]))]
-    tail = [f'confidence {analysis.confidence}', f'{analysis.relation_to_trend.lower().replace("_", " ")} trend',
-            analysis.evidence_strength.lower() + ' evidence']
+        lines += [f"<b>{L['impact_now']}:</b> {esc(impacts)}"]
+    if chain:
+        lines += [f"<b>{L['chain']}:</b> " + esc(' → '.join(chain))]
+    relation = (analysis.relation_to_trend.lower().replace('_', ' ') if lang == 'en'
+                else i18n.enum(analysis.relation_to_trend, lang))
+    evidence = analysis.evidence_strength.lower() if lang == 'en' else i18n.enum(analysis.evidence_strength, lang)
+    tail = [f"{L['confidence']} {analysis.confidence}", L['trend_relation'].format(relation=relation),
+            L['evidence'].format(evidence=evidence)]
     if article_count:
-        tail.append(f'{article_count} source item(s)')
-    lines += ['', esc(' · '.join(tail)), esc(f"event {event['id']} · {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC")]
+        tail.append(L['source_items'].format(n=article_count))
+    if i18n.translation_active(lang):
+        tail.append(L['machine_translated'])
+    lines += ['', esc(' · '.join(tail)),
+              esc(L['event_tail'].format(id=event['id'], stamp=f'{datetime.now(timezone.utc):%Y-%m-%d %H:%M}'))]
     return '\n'.join(lines)

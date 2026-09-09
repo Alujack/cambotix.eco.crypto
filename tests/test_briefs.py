@@ -46,17 +46,30 @@ def test_lights():
     assert light('geopolitical_risk', -60) == '🟢' and light('anything', 0, known=False) == '⚪'
 
 
-def test_narrative_is_opt_in_for_local_models(monkeypatch):
-    """An 8B model fabricated an event in the narrative; data sections are deterministic, prose is not."""
+def test_narrative_is_enabled_by_default_and_switchable(monkeypatch):
+    """Safety now comes from the groundedness gate, not from disabling prose per provider."""
     from app.config import brief_narrative_enabled
     monkeypatch.delenv('BRIEF_USE_AI', raising=False)
-    monkeypatch.setenv('AI_PROVIDER', 'ollama')
-    assert brief_narrative_enabled() is False
-    monkeypatch.setenv('AI_PROVIDER', 'anthropic')
-    assert brief_narrative_enabled() is True
-    monkeypatch.setenv('AI_PROVIDER', 'ollama')
-    monkeypatch.setenv('BRIEF_USE_AI', 'true')          # explicit opt-in still wins
-    assert brief_narrative_enabled() is True
-    monkeypatch.setenv('AI_PROVIDER', 'anthropic')
+    for provider in ('ollama', 'anthropic', 'mock'):
+        monkeypatch.setenv('AI_PROVIDER', provider)
+        assert brief_narrative_enabled() is True
     monkeypatch.setenv('BRIEF_USE_AI', 'false')
     assert brief_narrative_enabled() is False
+
+
+def test_ungrounded_narrative_is_withheld_and_explained(monkeypatch):
+    from app import briefs
+    brief = base()
+    brief['developments'] = [{'eventId': 'e1', 'title': 'US import ban on Canadian goods', 'importance': 75,
+                              'summary': 'A stagflationary, risk-off shift.', 'riskRegimeImpact': 'RISK_OFF',
+                              'relationToTrend': 'NEW_THEME'}]
+    monkeypatch.setattr(briefs.ai, 'narrate_brief', lambda _b: "The BOJ's rate hike drove risk-off sentiment.")
+    text, withheld = briefs._narrative(brief, True)
+    assert text is None and 'BOJ' in withheld
+    brief['narrative'], brief['narrativeWithheld'] = text, withheld
+    assert 'Narrative withheld' in render(brief) and 'BOJ' in render(brief)
+
+    monkeypatch.setattr(briefs.ai, 'narrate_brief',
+                        lambda _b: 'The US import ban is a risk-off, stagflationary shift for the week.')
+    text, withheld = briefs._narrative(brief, True)
+    assert withheld is None and text.startswith('The US import ban')
