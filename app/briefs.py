@@ -4,14 +4,13 @@ from datetime import date, datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
-from app import ai, grounding, i18n
+from app import ai, grounding, i18n, outlook, social
 from app.config import ASSET_UNIVERSE, ai_configured, ai_provider, model_for, output_language
 from app.intel import LATEST_ANALYSIS, macro_current, upcoming_releases
 from app.macro_state import DIMENSIONS, light
 
 log = logging.getLogger('eco.briefs')
 REGION_ORDER = ['US', 'EU', 'GLOBAL', 'CRYPTO']
-TREND = {'RISING': '↑', 'FALLING': '↓', 'STABLE': '→'}
 RULE = '━' * 26
 
 
@@ -22,7 +21,8 @@ def ai_model_label() -> str:
     return f'{ai_provider()}:{model_for("analyst")}' + ('+decomposed' if decompose_analysis() else '')
 
 
-def build_daily(conn, brief_date: date | None = None, use_ai: bool = True) -> dict:
+def build_daily(conn, brief_date: date | None = None, use_ai: bool = True,
+                narrative: str | None = None) -> dict:
     now = datetime.now(timezone.utc)
     brief_date = brief_date or now.date()
     current = macro_current(conn, now)
@@ -67,6 +67,7 @@ def build_daily(conn, brief_date: date | None = None, use_ai: bool = True) -> di
                                  for dim, v in dims.items()} for region, dims in current['regions'].items()},
         'riskRegime': current['riskRegime'], 'globalLiquidity': current['globalLiquidity'],
         'assetPressure': {asset: current['assets'][asset]['score'] for asset in ASSET_UNIVERSE},
+        'assetOutlook': outlook.rows(current['assets'], outlook.track_record(conn)),
         'developments': [{'eventId': r['id'], 'title': r['title'], 'importance': r['importance'], 'summary': r['summary'],
                           'riskRegimeImpact': r['risk_regime_impact'], 'relationToTrend': r['relation_to_trend']}
                          for r in developments],
@@ -80,33 +81,53 @@ def build_daily(conn, brief_date: date | None = None, use_ai: bool = True) -> di
                      'extracted24h': stats['extracted_24h'], 'analyzed24h': len(developments), 'aiConfigured': ai_ready,
                      'model': ai_model_label(), 'flagged24h': flagged['flagged'], 'analysesTotal24h': flagged['total']},
     }
-    brief['narrative'], brief['narrativeWithheld'] = _narrative(brief, use_ai and bool(developments))
+    brief['narrative'], brief['narrativeWithheld'] = _narrative(brief, use_ai and bool(developments), narrative)
     brief['text'] = render(brief)
     # Stored and served in English (the trading engines read this); `textLocalized` is what Telegram delivers.
     lang = output_language()
+    delivered = brief if lang == 'en' else localized(brief, lang)
     if lang != 'en':
-        brief['textLocalized'] = render(_localized(brief, lang), lang)
+        brief['textLocalized'] = render(delivered, lang)
+    # Publishable versions of the same brief, one per platform: the operator's chat gets `text`, a channel or page
+    # gets these (app.social). Built from the delivered copy, so a Khmer post is Khmer down to the rationales.
+    brief['social'] = {platform: social.daily_post(delivered, platform, lang) for platform in social.PLATFORMS}
     return brief
 
 
-def _localized(brief: dict, lang: str) -> dict:
+def localized(brief: dict, lang: str) -> dict:
     """A copy of the brief whose prose is in `lang`. Headlines, event titles and source names are verbatim source
     text, so they stay as published; the labels come from app.i18n at render time."""
     prose = ([brief['narrative']] if brief.get('narrative') else []) + list(brief['keyRisks'])
     prose += [d['summary'] for d in brief['developments'] if d.get('summary')]
+    prose += outlook.prose(brief.get('assetOutlook') or {})
     delivered = dict(zip(prose, i18n.translate(prose, lang)))
     return {**brief,
             'narrative': delivered.get(brief.get('narrative'), brief.get('narrative')),
             'keyRisks': [delivered.get(risk, risk) for risk in brief['keyRisks']],
             'developments': [{**d, 'summary': delivered.get(d.get('summary'), d.get('summary'))}
-                             for d in brief['developments']]}
+                             for d in brief['developments']],
+            'assetOutlook': outlook.translated(brief.get('assetOutlook') or {}, delivered)}
 
 
-def _narrative(brief: dict, use_ai: bool) -> tuple[str | None, list[str] | None]:
-    """Publish model prose only if its specific claims appear in the data it was given."""
-    if not use_ai:
-        return None, None
-    text = ai.narrate_brief(brief)
+def social_post(brief: dict, platform: str = 'telegram', lang: str | None = None) -> dict:
+    """One publishable post for `brief` (app.social). The build already rendered every platform in the configured
+    delivery language; another language is localized here on demand - a Khmer page and an English channel can be
+    served from the same brief."""
+    lang = lang or output_language()
+    posts = brief.get('social') or {}
+    if lang == output_language() and platform in posts:
+        return posts[platform]
+    return social.daily_post(brief if lang == 'en' else localized(brief, lang), platform, lang)
+
+
+def _narrative(brief: dict, use_ai: bool, supplied: str | None = None) -> tuple[str | None, list[str] | None]:
+    """Publish model prose only if its specific claims appear in the data it was given.
+
+    `supplied` is prose a previous run already published (a stored brief's narrative, reused so that rebuilding a
+    post costs no model call). It goes through the same gate: yesterday's groundedness says nothing about whether
+    those claims are still in today's data.
+    """
+    text = supplied.strip() if supplied else (ai.narrate_brief(brief) if use_ai else None)
     if not text:
         return None, None
     ungrounded = grounding.ungrounded_claims(text, brief)
@@ -147,6 +168,8 @@ def render(brief: dict, lang: str = 'en') -> str:
         lines += ['', brief['narrative']]
     elif brief.get('narrativeWithheld'):
         lines += ['', L['narrative_withheld'].format(tokens=', '.join(brief['narrativeWithheld'][:4]))]
+    lines += ['', L['asset_outlook'], RULE]
+    lines += _outlook_lines(brief.get('assetOutlook') or {}, lang, L)
     lines += ['', L['upcoming'], RULE]
     highs = [r for r in brief['upcoming'] if r['impact'] == 'HIGH']
     lines += [_release_line(r, lang, L) for r in highs] or [L['none_scheduled']]
@@ -163,12 +186,6 @@ def render(brief: dict, lang: str = 'en') -> str:
     if brief.get('topHeadlines'):
         lines += ['', L['top_headlines'], RULE]
         lines += [_headline_line(h, 72, lang, source_limit=24) for h in brief['topHeadlines']]
-    lines += ['', L['asset_pressure'], RULE]
-    if any(brief['assetPressure'].values()):
-        lines += [f'{asset:<8}{score:+d}' if lang == 'en' else f'{asset} {score:+d}'
-                  for asset, score in brief['assetPressure'].items()]
-    else:
-        lines.append(L['all_neutral'])
     lines += ['', L['key_risks'], RULE]
     lines += [f'• {risk}' for risk in brief['keyRisks']] or [f"• {L['none_recorded']}"]
     if i18n.translation_active(lang):
@@ -177,11 +194,45 @@ def render(brief: dict, lang: str = 'en') -> str:
 
 
 def _regime_line(region: str, dim: str, v: dict, lang: str) -> str:
-    lamp, arrow, name = light(dim, v['score']), TREND.get(v['trend'], ''), i18n.dimension(dim, lang)
-    state = i18n.state_label(dim, v['state'], lang)
+    """One dimension as a phrase rather than a row of tokens: "US inflation: above target and rising (+35)"."""
+    lamp, arrow, name = light(dim, v['score']), i18n.TREND_ARROW.get(v['trend'], ''), i18n.dimension(dim, lang)
+    reading = i18n.state_reading(dim, v['state'], v['trend'], lang)
     if lang == 'en':
-        return f"{lamp} {region:<7}{name:<19}{state:<20}{arrow} {v['score']:+d}"
-    return f"{lamp} {region} · {name}៖ {state} {arrow} {v['score']:+d}"
+        return f"{lamp} {region:<7}{name + ':':<20}{reading} {arrow} ({v['score']:+d})"
+    return f"{lamp} {region} · {name}៖ {reading} {arrow} ({v['score']:+d})"
+
+
+def _outlook_lines(view: dict, lang: str, L: dict) -> list[str]:
+    """Each asset the engine has a read on: which way, how hard, over which horizon, why, and how much to trust it."""
+    material = view.get('material') or []
+    if not material:
+        return [L['all_neutral']]
+    indent = '   ' if lang == 'en' else ''
+    lines: list[str] = []
+    for row in material:
+        horizons = row['horizons']
+        lines.append(L['outlook_headline'].format(name=i18n.asset_name(row['asset'], lang), asset=row['asset'],
+                                                  direction=i18n.outlook_word(row['direction'], lang),
+                                                  path=i18n.outlook_word(row['path'], lang)))
+        lines.append(indent + L['outlook_horizons'].format(
+            now=_score(horizons.get('immediate')), week=_score(horizons.get('short_term')),
+            months=_score(horizons.get('medium_term')), meaning=i18n.up_means(row['asset'], lang)))
+        for driver in row['drivers']:
+            lines.append(f"{indent}{L['outlook_why']}: {driver['rationale']}")
+            lines.append(indent + L['outlook_driver'].format(title=outlook.clip(driver['title'], 60),
+                                                             importance=driver['importance']))
+        tail = [L['outlook_evidence'].format(evidence=i18n.outlook_word(row['evidence'], lang), n=row['eventCount'])]
+        record = row.get('trackRecord') or {}
+        if record.get('hitRate') is not None:
+            tail.append(L['outlook_track'].format(hit=record['confirmed'], total=record['checks'], days=record['days']))
+        lines += [indent + ' · '.join(tail), '']
+    if view.get('quiet'):
+        lines.append(L['outlook_quiet'].format(assets=', '.join(view['quiet'])))
+    return lines
+
+
+def _score(horizon: dict | None) -> str:
+    return f"{horizon['score']:+d}" if horizon else '—'
 
 
 def _release_line(release: dict, lang: str, L: dict) -> str:
@@ -189,7 +240,7 @@ def _release_line(release: dict, lang: str, L: dict) -> str:
     if lang == 'en':
         return (f"{when}  {release['currency']:<4}{release['title'][:34]:<35} "
                 f"{L['forecast']} {forecast} · {L['previous']} {previous}")
-    return (f"{when} · {release['currency']} {_clip(release['title'], 48)} · "
+    return (f"{when} · {release['currency']} {outlook.clip(release['title'], 48)} · "
             f"{L['forecast']} {forecast} · {L['previous']} {previous}")
 
 
@@ -199,13 +250,8 @@ def _headline_line(headline: dict, limit: int, lang: str, source_limit: int | No
     source = source[:source_limit] if source_limit else source
     when = _when(headline['publishedAt'], lang)
     if lang == 'en':
-        return f"{when}  {_clip(headline['headline'], limit)}  — {source}"
-    return f"{when} · {_clip(headline['headline'], limit + 18)} — {source}"
-
-
-def _clip(text: str, limit: int) -> str:
-    text = str(text)
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+        return f"{when}  {outlook.clip(headline['headline'], limit)}  — {source}"
+    return f"{when} · {outlook.clip(headline['headline'], limit + 18)} — {source}"
 
 
 def _when(value, lang: str = 'en') -> str:

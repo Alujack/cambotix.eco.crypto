@@ -369,6 +369,18 @@ def mock_extract(article: dict) -> Extraction:
         importance=int(article.get('importance_prior') or 40), fact_summary=(article.get('headline') or '')[:300])
 
 
+# One channel sentence per asset: the delivered alert quotes the rationale verbatim, so a single shared sentence
+# would make the mock output look like the bug it was ("Textbook inflation-surprise channel" against eight assets).
+_MOCK_CHANNELS = {
+    'USD': 'the expected policy path moves and the dollar follows the front end',
+    'US10Y': 'the market re-prices how many cuts are left, and the 10-year yield moves with it',
+    'XAUUSD': 'real yields move, and with them the cost of holding an asset that pays no coupon',
+    'BTC': 'expected dollar liquidity is the channel, and BTC trades as the long-duration risk asset',
+    'SPX': 'the discount rate moves before earnings do, so the multiple re-prices first',
+    'EURUSD': 'the move is dollar-side: the rate differential widens in the dollar\'s favour',
+}
+
+
 def mock_analyze(context: dict) -> Analysis:
     event = context.get('event', {})
     facts = event.get('facts', {})
@@ -382,12 +394,14 @@ def mock_analyze(context: dict) -> Analysis:
         interpretation['inflation'] = 'HOTTER' if sign > 0 else 'COOLER'
         interpretation['liquidity'] = 'TIGHTER' if sign > 0 else 'LOOSER'
         fed = 'MORE_HAWKISH' if sign > 0 else 'MORE_DOVISH'
+        opener = 'a hotter-than-expected print' if sign > 0 else 'a cooler-than-expected print'
         for asset, score in (('USD', 60), ('US10Y', 60), ('XAUUSD', -50), ('BTC', -45), ('SPX', -30), ('EURUSD', -45)):
             value = int(score * sign)
             impacts.append({'asset': asset, 'immediate': {'direction': 'NEUTRAL', 'score': value},
                             'short_term': {'direction': 'NEUTRAL', 'score': int(value * 0.7)},
                             'medium_term': {'direction': 'NEUTRAL', 'score': int(value * 0.3)},
-                            'rationale': 'Textbook inflation-surprise channel (mock analyst).'})
+                            'rationale': f'On {opener}, {_MOCK_CHANNELS[asset]}; the effect is largest on the day '
+                                         f'and decays as the next print approaches (mock analyst).'})
         updates = [{'region': 'US', 'dimension': 'inflation', 'direction': sign, 'magnitude': 60,
                     'reason': 'Inflation print vs consensus'},
                    {'region': 'US', 'dimension': 'monetary_policy', 'direction': sign, 'magnitude': 35,

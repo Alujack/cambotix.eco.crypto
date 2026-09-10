@@ -43,6 +43,9 @@ def main():
               f"  last={tg['lastKind'] or '-'} {tg['lastSent'] or ''}")
     else:
         print('Telegram      not connected (python3 scripts/telegram_setup.py)')
+    channel = tg.get('channelId')
+    print(f"Channel       {channel}  (daily post + event posts)" if channel
+          else 'Channel       no public channel (set TELEGRAM_CHANNEL_ID to post; GET /social/daily serves the text)')
     sources = get(base, env['ENGINE_TOKEN'], '/sources')
     active = [s for s in sources if s['articles']]
     print(f"Sources       {len(sources)} registered, {len(active)} delivering, "

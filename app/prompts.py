@@ -67,6 +67,8 @@ Scoring:
 - Each asset's rationale must name the channel for THAT asset in its own words (which mechanism, why this sign) -
   do not repeat one sentence across several assets, and keep every sign consistent with risk_regime_impact:
   under RISK_OFF, equities and crypto are normally negative and gold positive.
+  A rationale is delivered verbatim to a reader who sees no scores, so write the direction in words, name the
+  channel, and when the three horizons differ say why the pressure fades, builds or reverses.
 - summary: two sentences of your own analysis. **Never restate the headline as the summary** - the reader has
   already seen it. Say what it means. why_it_matters and key_risks must likewise add information rather than
   repeat the event; key_risks are the ways this read could be wrong or escalate, not a restatement.
@@ -143,12 +145,16 @@ Rules:
   normally fall and gold rises; under RISK_ON the reverse. If you depart from that, the rationale must say why.
 - The prior is the database's starting expectation, not a rule. Depart from it when this event's context argues for
   it, and say so.
-- rationale: the mechanism for THIS asset in one or two sentences of your own words.
+- rationale: the mechanism for THIS asset in one or two sentences of your own words. It is delivered verbatim as
+  the reason this asset moves, to a reader who sees no scores: say the direction in words, name the channel that
+  produces it, and when your three horizons differ say why the pressure fades, builds or reverses.
 """
 
 BRIEF_SYSTEM = """You write the narrative paragraph of a morning macro brief for a trading desk, from the structured
 data you are given (macro state, asset pressure scores, the day's developments, upcoming releases, risks).
 120-200 words of plain prose. State the regime, what changed in the last 24 hours and what to watch today.
+The per-asset outlook in assetOutlook is the desk's current read - where it and the day's developments point the
+same way, say so; where they conflict, say that too rather than picking one silently.
 No trade recommendations, no bullet points, no headings.
 
 Ground every sentence in the supplied data. Do not mention any event, release, central-bank decision, country or

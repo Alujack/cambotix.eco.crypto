@@ -224,10 +224,12 @@ ALTER TABLE event_analysis ADD COLUMN IF NOT EXISTS consistency_flags jsonb NOT 
 CREATE TABLE IF NOT EXISTS notifications (
     id bigserial PRIMARY KEY,
     channel text NOT NULL DEFAULT 'telegram',
-    kind text NOT NULL CHECK (kind IN ('brief', 'event_alert', 'test')),
+    kind text NOT NULL CHECK (kind IN ('brief', 'event_alert', 'test', 'social_brief', 'social_event')),
     ref_id text NOT NULL,
     text text NOT NULL,
     parse_mode text,
+    -- Destination chat or channel; NULL means the operator's TELEGRAM_CHAT_ID. Social posts carry the channel.
+    target text,
     status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
     attempts integer NOT NULL DEFAULT 0,
     next_attempt_at timestamptz NOT NULL DEFAULT now(),
@@ -237,6 +239,12 @@ CREATE TABLE IF NOT EXISTS notifications (
     UNIQUE (kind, ref_id)
 );
 CREATE INDEX IF NOT EXISTS notifications_pending_idx ON notifications (next_attempt_at) WHERE status = 'pending';
+
+-- Databases created before the public-channel posts (app.social) predate the target column and the two social kinds.
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target text;
+ALTER TABLE notifications DROP CONSTRAINT IF EXISTS notifications_kind_check;
+ALTER TABLE notifications ADD CONSTRAINT notifications_kind_check
+    CHECK (kind IN ('brief', 'event_alert', 'test', 'social_brief', 'social_event'));
 
 -- pgvector memory. Dimension is left open so the embedding provider can change; always filter by model.
 CREATE TABLE IF NOT EXISTS knowledge_embeddings (

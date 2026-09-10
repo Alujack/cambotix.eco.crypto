@@ -6,7 +6,7 @@ from app import briefs, i18n, telegram
 from app.ai import mock_analyze
 from app.macro_state import DIMENSIONS, LABELS as STATE_VOCABULARY
 from app.schemas import Analysis, CentralBankImplication, EconomicInterpretation
-from tests.test_briefs import base
+from tests.test_briefs import base, outlook_row
 
 TRANSLATIONS = {lang: table for lang, table in i18n.LABEL_TABLES.items() if lang != 'en'}
 
@@ -38,7 +38,7 @@ def test_enum_and_dimension_tables_cover_what_is_delivered():
             delivered |= set(get_args(field.annotation))
     for name in ('risk_regime_impact', 'relation_to_trend', 'evidence_strength', 'horizon'):
         delivered |= set(get_args(Analysis.model_fields[name].annotation))
-    for lang, table in i18n.ENUM_TABLES.items():
+    for lang, table in {'en': i18n.EN_ENUMS, **i18n.ENUM_TABLES}.items():
         assert not delivered - set(table), (lang, sorted(delivered - set(table)))
     for lang, table in i18n.DIMENSION_TABLES.items():
         assert not {d for dims in DIMENSIONS.values() for d in dims} - set(table), lang
@@ -47,10 +47,30 @@ def test_enum_and_dimension_tables_cover_what_is_delivered():
 def test_state_labels_are_positional_not_by_word():
     """TIGHT is a tight labour market in one dimension and a liquidity squeeze in another."""
     assert i18n.state_label('employment', 'TIGHT', 'km') != i18n.state_label('liquidity', 'TIGHT', 'km')
-    assert i18n.state_label('inflation', 'ABOVE_TARGET', 'en') == 'ABOVE_TARGET'
     assert i18n.state_label('inflation', 'NOT_A_STATE', 'km') == 'NOT_A_STATE'   # a new enum reads English
-    assert i18n.enum('MORE_HAWKISH', 'en') == 'MORE_HAWKISH' and i18n.enum('MORE_HAWKISH', 'km') != 'MORE_HAWKISH'
     assert i18n.dimension('monetary_policy', 'en') == 'monetary policy'
+
+
+def test_english_is_a_delivery_language_too():
+    """The stored enum is for the trading engines; a reader should never have to decode WELL_ABOVE_TARGET."""
+    assert i18n.state_label('inflation', 'WELL_ABOVE_TARGET', 'en') == 'well above target'
+    assert i18n.state_label('risk_appetite', 'RISK_OFF', 'en') == 'risk-off'     # not "risk off"
+    assert i18n.enum('MORE_HAWKISH', 'en') == 'more hawkish' and i18n.enum('MORE_HAWKISH', 'km') != 'more hawkish'
+    assert i18n.enum('NOT_AN_ENUM', 'en') == 'NOT_AN_ENUM'                       # a new enum reads as stored
+    assert i18n.asset_name('XAUUSD', 'en') == 'Gold' and i18n.asset_name('BTC', 'km') == 'Bitcoin'
+
+
+def test_outlook_tables_match_and_never_borrow_the_enum_meaning():
+    """NEUTRAL is "neutral" as an inflation read and "no clear direction" as a direction of travel."""
+    assert set(i18n.EN_OUTLOOK) == set(i18n.KM_OUTLOOK)
+    assert set(i18n.EN_UP_MEANS) == set(i18n.KM_UP_MEANS)
+    assert i18n.outlook_word('NEUTRAL', 'en') != i18n.enum('NEUTRAL', 'en')
+    for lang in ('en', 'km'):
+        for token in i18n.EN_OUTLOOK:
+            assert i18n.outlook_word(token, lang).strip()
+        for asset in i18n.EN_UP_MEANS:
+            assert i18n.up_means(asset, lang).strip()
+    assert i18n.outlook_word('NOT_A_TOKEN', 'km') == 'NOT_A_TOKEN'
 
 
 def test_output_language_falls_back_to_english(monkeypatch):
@@ -101,15 +121,21 @@ def test_khmer_brief_localizes_labels_and_keeps_the_data(monkeypatch):
     brief['macroRegime']['US']['inflation'] = {'state': 'ABOVE_TARGET', 'trend': 'RISING', 'score': 35, 'known': True}
     brief['pipeline']['aiConfigured'] = True
     brief['assetPressure'] = {'USD': 38, 'BTC': -28}
+    brief['assetOutlook'] = {'material': [outlook_row()], 'quiet': ['ETH']}
     brief['keyRisks'] = ['Tariff escalation']
     brief['developments'] = [{'eventId': 'e1', 'title': 'US CPI above forecast', 'importance': 90,
                               'summary': 'A hotter print.', 'riskRegimeImpact': 'RISK_OFF', 'relationToTrend': 'CONFIRMS'}]
-    text = briefs.render(briefs._localized(brief, 'km'), 'km')
+    text = briefs.render(briefs.localized(brief, 'km'), 'km')
 
     assert i18n.KM_LABELS['macro_regime'] in text and i18n.KM_LABELS['key_risks'] in text
     assert i18n.KM_STATES['inflation'][1] in text and 'ABOVE_TARGET' not in text
-    assert '+35' in text and '↑' in text and 'USD +38' in text and 'BTC -28' in text
-    assert 'USD     +38' not in text                       # no character-grid padding outside the <pre> block
+    assert '+35' in text and '↑' in text
+    assert 'US     ' not in text                           # no character-grid padding outside the <pre> block
+    # The outlook is delivered in Khmer down to the direction and the meaning of the sign, but keeps the ticker.
+    assert f"{i18n.KM_ASSETS['XAUUSD']} (XAUUSD)" in text and i18n.KM_OUTLOOK['SLIGHT_BEARISH'] in text
+    assert i18n.KM_OUTLOOK['FADING'] in text and i18n.KM_UP_MEANS['XAUUSD'] in text
+    assert '-52' in text and '-14' in text
+    assert i18n.KM_LABELS['outlook_quiet'].format(assets='ETH') in text
     assert 'សុក្រ 12:30Z' in text and 'fcst' not in text     # localized weekday and field labels
     # Verbatim source text is delivered as published; the engine's own prose is translated.
     assert 'Fed officials signal patience on cuts' in text and 'US CPI above forecast' in text
@@ -124,8 +150,10 @@ def test_khmer_event_alert_keeps_tickers_scores_and_escaping(monkeypatch):
     text = telegram.format_event_alert(event, analysis, 3, lang='km')
 
     assert text.startswith('🔴 <b>US CPI &lt;hot&gt; &amp; sticky</b>') and '<hot>' not in text
-    assert i18n.KM_LABELS['impact_now'] in text and i18n.KM_LABELS['chain'] in text
-    assert 'USD +60/+42' in text and f"Fed {i18n.KM_ENUMS['MORE_HAWKISH']}" in text
+    assert i18n.KM_LABELS['market_impact'] in text and i18n.KM_LABELS['chain'] in text
+    assert f"{i18n.KM_ASSETS['USD']} (USD)" in text and i18n.KM_OUTLOOK['BULLISH'] in text
+    assert i18n.KM_LABELS['alert_horizons'].format(now='+60', week='+42', months='+18') in text
+    assert f"Fed {i18n.KM_ENUMS['MORE_HAWKISH']}" in text
     assert 'MORE_HAWKISH' not in text and 'confidence' not in text
     assert i18n.KM_ENUMS['CONFIRMS'] in text or i18n.KM_ENUMS['NEW_THEME'] in text
     assert 'km:' in text and 'ព័ត៌មានប្រភព 3' in text

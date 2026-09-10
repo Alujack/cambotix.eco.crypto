@@ -6,7 +6,7 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 ## Stack
 - n8n (Docker, own `n8n` database) — collectors on schedules, thin: RSS/HTTP → Code normalize → POST to the engine
 - Python 3.12 + FastAPI (`app/`) — ingest, dedupe, extraction, event clustering, analyst, macro state, reactions,
-  briefs, and the intelligence API. Runs as the `engine` service on 127.0.0.1:8020
+  briefs, public posts, and the intelligence API. Runs as the `engine` service on 127.0.0.1:8020
 - PostgreSQL 17 + pgvector (`db/02-schema.sql`) — one database `eco`; vector memory in `knowledge_embeddings`
 - AI is provider-switchable via `AI_PROVIDER`: `ollama` (default — Llama 3.1 8B local, grammar-constrained JSON),
   `anthropic` (`claude-haiku-4-5` extractor + `claude-opus-5` analyst, adaptive thinking, structured outputs),
@@ -24,6 +24,9 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
   (rebuilds the image first: app/ and tests/ are baked in, so without it you would test stale code)
 - `python3 scripts/telegram_setup.py` — connect the bot: discover chat id, write `.env`, restart engine, send a test
 - `python3 scripts/pull_models.py` — make the models named in `.env` present in Ollama
+- `python3 scripts/compare_models.py <model> <model>` — re-analyse the same events under each model and report
+  flags/assets/seconds per analysis (restores `.env` afterwards)
+- `docs/trader-value-roadmap.md` — what to build next for a reader, ranked by value per unit of work
 - `python3 scripts/setup.py` — regenerate `.local/import/*` and the committed `n8n/*.json` templates
 - `docker compose logs --tail=100 engine n8n`
 
@@ -48,9 +51,29 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - Never silently rewrite model output. Disagreements go through `app/consistency.py` as recorded flags, so weak-model
   analyses can be discounted downstream instead of looking authoritative.
 - Local inference is serial: the extract/analyze endpoints hold a lock and return `skipped: busy` rather than queueing.
+- Keep ONE chat model resident: set `EXTRACT_MODEL` and `ANALYST_MODEL` to the same id and stay ~5 GB. On this
+  16 GB host Docker Desktop holds a 7.8 GB VM, leaving ~1.5 GB free with swap 13 GB deep — a 14B model wedges it.
+- `/health` must stay local (no outbound calls): the container healthcheck runs it every 10 s with a 3 s budget
+  and a busy model server made an inline probe fail it. Provider reachability lives on `/ai/status`.
+- httpx request logging is pinned to WARNING: it logs full URLs at INFO, which would write the Telegram bot
+  token into the container logs on every send.
 - Country codes are normalized to ISO-2 (`app/normalize.normalize_countries`) before they reach a clustering key —
   models write "Canada" as often as "CA" and the event key and array matching depend on one spelling.
 - `US10Y` scores are yield direction (BULLISH = yield up). Scores are -100..100, negative = bearish.
+- Delivered text never shows a bare score. `app/outlook.py` is the layer that says a read the way an analyst would:
+  direction in words (from the horizon carrying the move), the path across the three horizons
+  (FADING/BUILDING/STEADY/FLIPPING), the analyst's own per-asset rationale verbatim, what "up" means for that
+  instrument, the weight of the evidence, and the engine's measured hit rate from `market_reactions` — withheld
+  below 5 directional calls, because 2-of-2 reads as skill when it is noise. It computes no judgement of its own.
+- The outlook vocabulary is a separate table from the enum vocabulary in `app/i18n.py`. `NEUTRAL` is "neutral" as an
+  inflation read and "no clear direction" as a direction of travel; one table cannot serve both. English is a
+  delivery language too (`EN_ENUMS`, and `state_label` lowercases): stored enums are for the trading engines that
+  read the API, and no reader should have to decode `WELL_ABOVE_TARGET`.
+- Public posts (`app/social.py`) are the same data as the brief, rendered as news: no model writes a headline, the
+  lede is prose that already passed a gate (the brief's narrative, or an analyst's summary), and a track record is
+  published only when `market_reactions` measured enough windows to support it. Never trading advice: no entries,
+  stops, sizing or price targets, and every post carries the disclaimer label. Platform differences are rendering
+  only (`telegram` = HTML, `facebook` = plain text); hashtags stay Latin-script English in every language.
 - `OUTPUT_LANGUAGE` (`en` default, `km` Khmer) changes **delivered text only** — Telegram messages and the rendered
   brief. The database, the intelligence API and `app/grounding.py` stay English: the trading engines read that API,
   and the groundedness gate matches capitalised proper nouns, which Khmer has none of. Labels come from the static
@@ -64,5 +87,9 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - macro state: living score per region×dimension (`macro_state`), journaled in `macro_state_history`
 - asset impact: per-event, per-asset, per-horizon score (immediate 0-4h, short 1-5d, medium 2-8w)
 - reaction: what the market actually did at 5m/15m/1h/4h/24h vs the expected direction
-- notification: one outbox row (`notifications`) per Telegram message: brief, event_alert or test
+- notification: one outbox row (`notifications`) per Telegram message: brief, event_alert, test, social_brief or
+  social_event; `target` is the chat or channel it goes to (NULL = the operator's `TELEGRAM_CHAT_ID`)
+- post: the brief or one event rendered for a public channel or page (`app/social.py`), served by `/social/*`
+- outlook: the delivered per-asset read (`app/outlook.py`) — direction, path, reason, evidence, track record
+- track record: how often the engine's expected direction was confirmed by the measured price move (`market_reactions`)
 - delivery language: the language of the text Telegram receives (`app/i18n.py`); English remains the storage language

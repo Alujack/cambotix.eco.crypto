@@ -38,6 +38,19 @@ def _corpus(brief: dict) -> str:
                       str(value.get('score', ''))]
     for asset, score in (brief.get('assetPressure') or {}).items():
         parts += [asset, str(score), str(abs(int(score))) if isinstance(score, int) else '']
+    # The per-asset outlook is in the model's input too, so its instrument names, driving events and the analyst's
+    # own rationales are legitimate ground for the narrative to stand on.
+    outlook = brief.get('assetOutlook') or {}
+    parts += list(outlook.get('quiet') or [])
+    for row in outlook.get('material') or []:
+        parts += [str(row.get('asset', '')), str(row.get('name', '')), str(row.get('upMeans', '')),
+                  str(row.get('direction', '')), str(row.get('score', '')),
+                  str(abs(int(row['score']))) if isinstance(row.get('score'), int) else '']
+        for horizon in (row.get('horizons') or {}).values():
+            parts += [str(horizon.get('score', '')), str(abs(int(horizon['score'])))
+                      if isinstance(horizon.get('score'), int) else '']
+        for driver in row.get('drivers') or []:
+            parts += [str(driver.get('title', '')), str(driver.get('rationale', '')), str(driver.get('importance', ''))]
     return ' '.join(parts).lower()
 
 

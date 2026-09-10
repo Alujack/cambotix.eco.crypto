@@ -94,6 +94,10 @@ def scenario(base, token):
     status, brief = call(base, token, 'POST', '/briefs/daily')
     assert status == 200 and 'GLOBAL MACRO BRIEF' in brief['text'], brief
     print('daily brief rendered,', len(brief['text'].splitlines()), 'lines')
+    status, post = call(base, token, 'GET', '/social/daily?platform=facebook')
+    assert status == 200 and 'not trading advice' in post['text'] and '#Macro' in post['text'], post
+    assert '<' not in post['text'], post
+    print('social post ready,', post['chars'], 'chars,', ' '.join(post['hashtags']))
     status, result = call(base, token, 'POST', '/process/reactions')
     assert status == 200, result
     print('reactions:', result)

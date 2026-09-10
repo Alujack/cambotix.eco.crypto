@@ -74,6 +74,18 @@ def test_pipeline_end_to_end(client):
     assert 'GLOBAL MACRO BRIEF' in brief['text'] and brief['developments']
     assert client.get('/briefs/latest?format=text', headers=HEADERS).text.startswith('🌍')
 
+    # The same intelligence as content to post: rebuilt from the database, no model call, ready to paste.
+    assert set(brief['social']) == set(('telegram', 'facebook'))
+    post = client.get('/social/daily?platform=facebook', headers=HEADERS).json()
+    assert post['parseMode'] is None and '<' not in post['text'] and '#Macro' in post['text']
+    assert 'WHAT IT MEANS FOR MARKETS' in post['text'] and 'not trading advice' in post['text']
+    assert client.get('/social/daily?format=text', headers=HEADERS).text.startswith('<b>🌍 GLOBAL MACRO')
+    event_post = client.get(f"/social/event/{analyzed['eventId']}?format=text", headers=HEADERS).text
+    assert 'US CPI' in event_post and 'not trading advice' in event_post and '#Inflation' in event_post
+    assert client.get('/social/event/evt_missing', headers=HEADERS).status_code == 404
+    assert client.get('/social/daily?platform=myspace', headers=HEADERS).status_code == 422
+    assert client.get('/social/daily?lang=fr', headers=HEADERS).status_code == 422
+
 
 def test_calendar_print_spawns_release_article(client):
     scheduled = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -100,7 +112,7 @@ def test_outbox_delivers_and_retries(client, monkeypatch):
         telegram.enqueue(conn, 'test', 'b', 'world')
     calls = []
 
-    def flaky(text, parse_mode=None):
+    def flaky(text, parse_mode=None, target=None):
         calls.append(text)
         if text == 'world':
             raise telegram.TelegramError('rate limited by Telegram')
@@ -110,8 +122,25 @@ def test_outbox_delivers_and_retries(client, monkeypatch):
     assert status['sent'] == 1 and status['pending'] == 1
     with database() as conn:
         conn.execute("UPDATE notifications SET next_attempt_at = now() WHERE status = 'pending'")
-    assert telegram.deliver_pending(sender=lambda t, p=None: None)['sent'] == 1
+    assert telegram.deliver_pending(sender=lambda t, p=None, target=None: None)['sent'] == 1
     assert client.get('/notify/status', headers=HEADERS).json()['pending'] == 0
+
+
+def test_a_social_post_is_delivered_to_its_own_channel(client, monkeypatch):
+    """The operator's chat and the public channel share one outbox, so a row carries its own destination."""
+    from app import telegram
+    from app.db import database
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'x')
+    monkeypatch.setenv('TELEGRAM_CHAT_ID', '1')
+    monkeypatch.setenv('TELEGRAM_CHANNEL_ID', '@cambotix_macro')
+    assert telegram.channel_configured()
+    with database() as conn:
+        telegram.enqueue(conn, 'brief', 'daily:2026-09-09', 'the full brief', 'HTML_PRE')
+        telegram.enqueue(conn, 'social_brief', 'daily:2026-09-09', 'the post', 'HTML', target=telegram.channel_id())
+    seen = []
+    result = telegram.deliver_pending(sender=lambda text, parse_mode=None, target=None: seen.append((text, target)))
+    assert result['sent'] == 2 and ('the post', '@cambotix_macro') in seen and ('the full brief', None) in seen
+    assert client.get('/notify/status', headers=HEADERS).json()['channelId'] == '@cambotix_macro'
 
 
 def test_interrupted_claims_are_swept_back(client):

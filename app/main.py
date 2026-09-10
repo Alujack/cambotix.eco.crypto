@@ -3,20 +3,21 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import ValidationError
 
 from pathlib import Path
 
-from app import ai, briefs, embeddings, i18n, intel, pipeline, sources, telegram
-from app.config import (ASSET_UNIVERSE, ai_configured, ai_provider, decompose_analysis, anthropic_configured,
-                        brief_narrative_enabled, model_for, ollama_base_url, output_language)
+from app import ai, briefs, embeddings, i18n, intel, pipeline, social, sources, telegram
+from app.config import (ASSET_UNIVERSE, SUPPORTED_LANGUAGES, ai_configured, ai_provider, decompose_analysis,
+                        anthropic_configured, brief_narrative_enabled, model_for, ollama_base_url, output_language)
 from app.db import database
-from app.schemas import IngestArticlesRequest, IngestCalendarRequest
+from app.schemas import Analysis, IngestArticlesRequest, IngestCalendarRequest
 
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s %(name)s %(levelname)s %(message)s')
 # httpx logs every request URL at INFO, which would write the Telegram bot token (it lives in the path) into the
@@ -172,6 +173,11 @@ def make_daily_brief(brief_date: date | None = None, notify: bool = True):
         text = brief.get('textLocalized') or brief['text']
         queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", text,
                                   'HTML_PRE' if lang == 'en' else None) if notify else None
+        # The same brief as a post, for the public channel (app.social). Off unless TELEGRAM_CHANNEL_ID is set.
+        if notify and telegram.channel_configured():
+            post = briefs.social_post(brief, 'telegram', lang)
+            queued = telegram.enqueue(conn, 'social_brief', f"daily:{brief['date']}", post['text'],
+                                      post['parseMode'], target=telegram.channel_id()) or queued
     brief['telegram'] = telegram.deliver_pending() if queued else {'skipped': 'not configured' if notify else 'notify=false'}
     return brief
 
@@ -193,6 +199,85 @@ def notify_test():
         telegram.enqueue(conn, 'test', stamp,
                          i18n.labels(output_language())['telegram_test'] + '\n' + stamp)
     return telegram.deliver_pending()
+
+# ---- publishable content (public Telegram channel, Facebook page, anywhere the text is pasted) ------------------
+def _platform(name: str) -> str:
+    if name not in social.PLATFORMS:
+        raise HTTPException(422, f'Unknown platform; one of {", ".join(social.PLATFORMS)}')
+    return name
+
+
+def _language(name: str | None) -> str:
+    if name and name not in SUPPORTED_LANGUAGES:
+        raise HTTPException(422, f'Unsupported language; one of {", ".join(sorted(SUPPORTED_LANGUAGES))}')
+    return name or output_language()
+
+
+def _daily_post(conn, brief_date: date | None, platform: str, lang: str) -> dict:
+    """The daily brief as a post, rebuilt from live data with no model call: the narrative is the one the stored
+    brief already published, and app.briefs re-checks it against the current data before it is reused."""
+    day = brief_date or datetime.now(timezone.utc).date()
+    stored = conn.execute('SELECT narrative FROM briefs WHERE kind = %s AND brief_date = %s', ('daily', day)).fetchone()
+    brief = briefs.build_daily(conn, day, use_ai=False, narrative=stored['narrative'] if stored else None)
+    return briefs.social_post(brief, platform, lang)
+
+
+def _event_post(conn, event_id: str, platform: str, lang: str) -> dict:
+    row = conn.execute('''SELECT e.id, e.title, e.importance, e.categories, e.article_count, a.raw
+                          FROM economic_events e JOIN event_analysis a ON a.event_id = e.id
+                          WHERE e.id = %s ORDER BY a.version DESC LIMIT 1''', (event_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, 'Unknown event, or it has not been analyzed yet')
+    try:
+        # `raw` is the stored Analysis dump, so it round-trips - unless it predates a change to app.schemas.
+        analysis = Analysis.model_validate(row['raw'])
+    except ValidationError as error:
+        raise HTTPException(422, f'Stored analysis no longer fits the current schema ({error.error_count()} field(s))')
+    return social.event_post(row, analysis, platform, lang, row['article_count'])
+
+
+@app.get('/social/daily', dependencies=[Depends(authorize)])
+def social_daily(platform: str = 'telegram', lang: str | None = None, brief_date: date | None = None,
+                 format: str = 'json'):
+    """Today's macro picture as content to post. `format=text` returns it ready to paste."""
+    platform, lang = _platform(platform), _language(lang)
+    with database() as conn:
+        post = _daily_post(conn, brief_date, platform, lang)
+    return PlainTextResponse(post['text']) if format == 'text' else post
+
+
+@app.get('/social/event/{event_id}', dependencies=[Depends(authorize)])
+def social_event(event_id: str, platform: str = 'telegram', lang: str | None = None, format: str = 'json'):
+    """One analyzed event as a breaking-news post."""
+    platform, lang = _platform(platform), _language(lang)
+    with database() as conn:
+        post = _event_post(conn, event_id, platform, lang)
+    return PlainTextResponse(post['text']) if format == 'text' else post
+
+
+@app.post('/social/publish', dependencies=[Depends(authorize)])
+def social_publish(kind: str = 'daily', event_id: str | None = None, brief_date: date | None = None,
+                   lang: str | None = None):
+    """Post to the public Telegram channel. A Facebook page is not published to from here - the engine holds no page
+    credentials; GET /social/daily?platform=facebook serves the text for whatever owns them."""
+    if not telegram.channel_configured():
+        raise HTTPException(503, 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHANNEL_ID not set')
+    lang = _language(lang)
+    with database() as conn:
+        if kind == 'daily':
+            post = _daily_post(conn, brief_date, 'telegram', lang)
+            ref = f"daily:{(brief_date or datetime.now(timezone.utc).date()).isoformat()}"
+            row_kind = 'social_brief'
+        elif kind == 'event':
+            if not event_id:
+                raise HTTPException(422, 'kind=event needs event_id')
+            post = _event_post(conn, event_id, 'telegram', lang)
+            ref, row_kind = event_id, 'social_event'
+        else:
+            raise HTTPException(422, 'kind must be daily or event')
+        telegram.enqueue(conn, row_kind, ref, post['text'], post['parseMode'], target=telegram.channel_id())
+    return {'kind': row_kind, 'ref': ref, 'channel': telegram.channel_id(), 'chars': post['chars'],
+            'delivery': telegram.deliver_pending()}
 
 
 @app.get('/analysis-quality', dependencies=[Depends(authorize)])
