@@ -14,8 +14,9 @@ from pydantic import ValidationError
 from pathlib import Path
 
 from app import ai, briefs, embeddings, i18n, intel, pipeline, social, sources, telegram
-from app.config import (ASSET_UNIVERSE, SUPPORTED_LANGUAGES, ai_configured, ai_provider, decompose_analysis,
-                        anthropic_configured, brief_narrative_enabled, model_for, ollama_base_url, output_language)
+from app.config import (ASSET_UNIVERSE, SUPPORTED_LANGUAGES, ai_configured, ai_provider, brief_style,
+                        decompose_analysis, anthropic_configured, brief_narrative_enabled, model_for,
+                        ollama_base_url, output_language)
 from app.db import database
 from app.schemas import Analysis, IngestArticlesRequest, IngestCalendarRequest
 
@@ -189,12 +190,18 @@ def make_daily_brief(brief_date: date | None = None, notify: bool = True, if_mis
     with database() as conn:
         brief = briefs.build_daily(conn, brief_date, use_ai)
         briefs.store(conn, brief, pipeline._model_label() if use_ai else None)
-        # English rides in a <pre> block so its columns stay aligned; Khmer and other proportional scripts do not
-        # sit on a character grid, so the localized render is laid out with separators and sent as plain text.
+        # The full brief is 12k characters, which Telegram splits into four messages and which buries the read
+        # under the macro table, the headline lists and the pipeline counters. The default delivery is therefore
+        # the digest - one message, the same data, news order. TELEGRAM_BRIEF_STYLE=full restores the old body;
+        # either way the complete text stays in `briefs` and on GET /briefs/latest.
         lang = output_language()
-        text = brief.get('textLocalized') or brief['text']
-        queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", text,
-                                  'HTML_PRE' if lang == 'en' else None) if notify else None
+        if brief_style() == 'full':
+            # English rides in a <pre> block so its columns stay aligned; Khmer and other proportional scripts do
+            # not sit on a character grid, so the localized render is plain text.
+            text, mode = brief.get('textLocalized') or brief['text'], 'HTML_PRE' if lang == 'en' else None
+        else:
+            text, mode = brief['operatorPost']['text'], brief['operatorPost']['parseMode']
+        queued = telegram.enqueue(conn, 'brief', f"daily:{brief['date']}", text, mode) if notify else None
         # The same brief as a post, for the public channel (app.social). Off unless TELEGRAM_CHANNEL_ID is set.
         if notify and telegram.channel_configured():
             post = briefs.social_post(brief, 'telegram', lang)

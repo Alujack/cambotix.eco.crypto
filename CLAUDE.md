@@ -27,6 +27,7 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
 - `python3 scripts/compare_models.py <model> <model>` — re-analyse the same events under each model and report
   flags/assets/seconds per analysis (restores `.env` afterwards)
 - `docs/trader-value-roadmap.md` — what to build next for a reader, ranked by value per unit of work
+- `docs/telegram-delivery.md` — what Telegram receives and why, with the platform's length and rate limits
 - `python3 scripts/setup.py` — regenerate `.local/import/*` and the committed `n8n/*.json` templates
 - `docker compose logs --tail=100 engine n8n`
 
@@ -69,6 +70,14 @@ It never trades. Gold / forex / crypto engines consume its intelligence API late
   inflation read and "no clear direction" as a direction of travel; one table cannot serve both. English is a
   delivery language too (`EN_ENUMS`, and `state_label` lowercases): stored enums are for the trading engines that
   read the API, and no reader should have to decode `WELL_ABOVE_TARGET`.
+- Telegram gets ONE message. The full brief is ~12k characters, which Telegram splits into four and which buries
+  the read under the macro table, the headline lists and the pipeline counters; the operator's chat receives
+  `brief['operatorPost']` instead — the `app/social.py` digest plus one line of pipeline health.
+  `TELEGRAM_BRIEF_STYLE=full` restores the old body. The complete text is always stored in `briefs` and served by
+  `GET /briefs/latest`, so nothing is lost by delivering less.
+- Message length is measured in UTF-16 code units, never `len()` (`app/telegram.width`): Telegram's 4096 cap counts
+  an emoji as 2 and a flag as 4, so a character count silently under-measures an emoji-dense brief. Chunks are
+  paced ~1s apart because Telegram asks senders not to exceed one message per second to a chat.
 - Public posts (`app/social.py`) are the same data as the brief, rendered as news: no model writes a headline, the
   lede is prose that already passed a gate (the brief's narrative, or an analyst's summary), and a track record is
   published only when `market_reactions` measured enough windows to support it. Never trading advice: no entries,

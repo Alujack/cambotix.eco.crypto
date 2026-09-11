@@ -91,6 +91,9 @@ def build_daily(conn, brief_date: date | None = None, use_ai: bool = True,
     # Publishable versions of the same brief, one per platform: the operator's chat gets `text`, a channel or page
     # gets these (app.social). Built from the delivered copy, so a Khmer post is Khmer down to the rationales.
     brief['social'] = {platform: social.daily_post(delivered, platform, lang) for platform in social.PLATFORMS}
+    # What the operator's own chat receives: the same read plus one line of pipeline health. Built from the same
+    # localized copy, so it costs no extra translation call.
+    brief['operatorPost'] = social.daily_post(delivered, 'telegram', lang, operations=True)
     return brief
 
 

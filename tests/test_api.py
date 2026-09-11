@@ -215,3 +215,35 @@ def test_a_built_but_undelivered_brief_is_not_done(client, monkeypatch):
                             ON CONFLICT (kind, ref_id) DO UPDATE SET status = EXCLUDED.status''',
                          (f'daily:{day.isoformat()}', status))
             assert _brief_done(conn, day, notify=True) is done, status
+
+
+def test_the_delivered_brief_is_one_readable_message(client, monkeypatch):
+    """The operator used to get the 12k-character brief, which Telegram splits into four messages.
+
+    The digest carries the same read in news order; the full text stays in `briefs` and on /briefs/latest.
+    """
+    from app import telegram
+    from app.db import database
+    from app.telegram import CHUNK, render_chunks, width
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'x')
+    monkeypatch.setenv('TELEGRAM_CHAT_ID', '1')
+    monkeypatch.setattr(telegram, 'deliver_pending', lambda *a, **k: {'claimed': 0, 'sent': 0, 'failed': 0})
+    brief = client.post('/briefs/daily', headers=HEADERS).json()
+    with database() as conn:
+        row = conn.execute("SELECT text, parse_mode FROM notifications WHERE kind = 'brief'").fetchone()
+    parts = render_chunks(row['text'], row['parse_mode'])
+    assert len(parts) == 1, f'{len(parts)} messages, {width(row["text"])} utf-16 units'
+    assert width(row['text']) <= CHUNK
+    # It is the digest, not the full brief, and the full brief is still stored and served.
+    assert row['text'] == brief['operatorPost']['text']
+    assert len(brief['text']) > len(row['text'])
+    assert client.get('/briefs/latest?format=text', headers=HEADERS).text == brief['text']
+
+
+def test_only_the_operator_digest_carries_pipeline_health(client):
+    """A public post must not leak queue depth, flag counts or the model name; the operator's own chat wants them."""
+    brief = client.post('/briefs/daily?notify=false', headers=HEADERS).json()
+    operator, public = brief['operatorPost']['text'], brief['social']['telegram']['text']
+    assert '⚙' in operator and 'analyses flagged' in operator
+    assert '⚙' not in public and 'analyses flagged' not in public
+    assert 'not trading advice' in operator and 'not trading advice' in public

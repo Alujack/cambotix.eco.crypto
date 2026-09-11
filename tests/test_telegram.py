@@ -1,5 +1,5 @@
 from app.ai import mock_analyze
-from app.telegram import chunks, format_event_alert
+from app.telegram import chunks, format_event_alert, width
 
 
 def test_chunks_respect_limit_and_lines():
@@ -69,3 +69,22 @@ def test_bot_token_never_reaches_the_logs(caplog, monkeypatch):
         except telegram_module.TelegramError:
             pass
     assert 'SUPERSECRETVALUE' not in caplog.text
+
+
+def test_width_counts_utf16_units_not_characters():
+    """Telegram's 4096 cap is UTF-16 code units: an emoji is two and a flag is four."""
+    assert width('abc') == 3
+    assert width('🟢') == 2 and len('🟢') == 1
+    assert width('🇺🇸') == 4 and len('🇺🇸') == 2
+
+
+def test_chunks_measure_the_limit_the_way_telegram_does():
+    """Chunking on len() let an emoji-dense message exceed the real cap - the send fails rather than truncating."""
+    line = '🟢🇺🇸 US inflation'                       # 2 + 4 + 14 = 20 units from 17 characters
+    parts = chunks('\n'.join([line] * 400), limit=100)
+    assert all(width(part) <= 100 for part in parts), [width(p) for p in parts]
+    assert max(len(part) for part in parts) > 0
+    # A single line longer than the limit is split without ever cutting an emoji in half.
+    solid = chunks('🟢' * 200, limit=10)
+    assert all(width(part) <= 10 for part in solid)
+    assert ''.join(solid) == '🟢' * 200               # nothing lost and no surrogate halves

@@ -74,6 +74,15 @@ def brief_narrative_enabled() -> bool:
     return True
 
 
+def brief_style() -> str:
+    """How the daily brief reaches the operator's chat: 'digest' (default) is the one-message read; 'full' is the
+    complete brief, which Telegram splits into four messages. The full text is stored and served by
+    GET /briefs/latest either way, so this only chooses what the phone receives.
+    """
+    value = env('TELEGRAM_BRIEF_STYLE', 'digest').strip().lower() or 'digest'
+    return value if value in ('digest', 'full') else 'digest'
+
+
 def output_language() -> str:
     """Language of the *delivered* text (Telegram messages, the rendered brief). Storage stays English: the database,
     the intelligence API and app.grounding all read English, and the gold/forex/crypto engines consume that API.

@@ -1,6 +1,7 @@
 """Telegram delivery through a Postgres outbox: enqueue -> send -> mark. Failures stay pending for the n8n flusher."""
 import html
 import logging
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -13,7 +14,8 @@ log = logging.getLogger('eco.telegram')
 # Belt and braces: this module builds URLs containing the bot token, so silence httpx here too even when the app's
 # logging setup in main.py has not run (tests, ad-hoc scripts).
 logging.getLogger('httpx').setLevel(logging.WARNING)
-CHUNK = 3900  # Telegram caps a message at 4096 characters
+CHUNK = 3900          # Telegram caps one message at 4096 UTF-16 code units; the margin absorbs the <pre> wrapper
+CHUNK_PAUSE_SECONDS = 1.1   # Telegram: "avoid sending more than one message per second" to a single chat
 MAX_ATTEMPTS = 5
 # An alert is read on a phone, so it carries the assets this event actually moves hardest, not the whole universe.
 ALERT_ASSETS = 4
@@ -32,7 +34,7 @@ def configured() -> bool:
 
 def channel_id() -> str:
     """The public channel the social posts go to. Separate from TELEGRAM_CHAT_ID on purpose: the operator's chat
-    gets the full brief with the pipeline internals, the channel gets the post (app.social)."""
+    gets the digest plus one line of pipeline health, the channel gets the same read without the internals."""
     return env('TELEGRAM_CHANNEL_ID').strip()
 
 
@@ -40,14 +42,41 @@ def channel_configured() -> bool:
     return bool(env('TELEGRAM_BOT_TOKEN') and channel_id())
 
 
+def width(text: str) -> int:
+    """A message's length as Telegram measures it: UTF-16 code units, not characters.
+
+    Every emoji outside the BMP counts two and a flag (a regional-indicator pair) counts four, so a brief full of
+    🟢/🇺🇸 is longer to Telegram than len() says. Measuring in characters silently under-counts and can push a
+    chunk past the 4096 cap, which fails the send rather than truncating it.
+    """
+    return len(text.encode('utf-16-le')) // 2
+
+
+def _fits(text: str, limit: int) -> int:
+    """Length of the longest prefix of `text` within `limit` UTF-16 units, counted in characters.
+
+    Cutting on a character boundary can never split a surrogate pair, so an emoji is always kept whole.
+    """
+    if width(text) <= limit:
+        return len(text)
+    used = 0
+    for index, char in enumerate(text):
+        step = 2 if ord(char) > 0xFFFF else 1
+        if used + step > limit:
+            return index
+        used += step
+    return len(text)
+
+
 def chunks(text: str, limit: int = CHUNK) -> list[str]:
     parts, current = [], ''
     for line in text.split('\n'):
-        while len(line) > limit:
-            parts.append(line[:limit])
-            line = line[limit:]
+        while width(line) > limit:
+            cut = max(1, _fits(line, limit))   # max(1) so a limit narrower than one character cannot spin forever
+            parts.append(line[:cut])
+            line = line[cut:]
         candidate = line if not current else current + '\n' + line
-        if len(candidate) > limit:
+        if width(candidate) > limit:
             parts.append(current)
             current = line
         else:
@@ -71,7 +100,12 @@ def send(text: str, parse_mode: str | None = None, target: str | None = None) ->
     if not token or not chat_id:
         raise TelegramError('TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set', retryable=False)
     with httpx.Client(timeout=20) as client:
-        for part in render_chunks(text, parse_mode):
+        for index, part in enumerate(render_chunks(text, parse_mode)):
+            # Telegram asks senders to "avoid sending more than one message per second" to a single chat, and a
+            # chunked message is exactly that burst: the old four-part brief went out back to back. Pace the parts
+            # so a long message cannot earn a 429 that strands the rest of it half-delivered.
+            if index:
+                time.sleep(CHUNK_PAUSE_SECONDS)
             payload = {'chat_id': chat_id, 'text': part, 'disable_web_page_preview': True}
             if parse_mode:
                 payload['parse_mode'] = 'HTML' if parse_mode == 'HTML_PRE' else parse_mode

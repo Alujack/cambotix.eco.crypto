@@ -45,8 +45,8 @@ TITLE_LIMIT = 160
 MAX_TAGS = 8
 # Sections in reading order, then the order they are given up in when a post would exceed the platform's limit.
 # The markets read, the credit line and the tags are never dropped: they are the post.
-SECTION_ORDER = ['head', 'lede', 'read', 'state', 'markets', 'chain', 'calendar', 'risks', 'credit', 'tags']
-DROP_ORDER = ['calendar', 'risks', 'state', 'chain']
+SECTION_ORDER = ['head', 'lede', 'read', 'state', 'markets', 'chain', 'calendar', 'risks', 'ops', 'credit', 'tags']
+DROP_ORDER = ['calendar', 'risks', 'ops', 'state', 'chain']
 
 DIRECTION_MARK = {'BULLISH': '🔺', 'SLIGHT_BULLISH': '🔼', 'NEUTRAL': '➖', 'SLIGHT_BEARISH': '🔽', 'BEARISH': '🔻'}
 FLAG = {'USD': '🇺🇸', 'EUR': '🇪🇺', 'GBP': '🇬🇧', 'JPY': '🇯🇵', 'CNY': '🇨🇳', 'CAD': '🇨🇦', 'AUD': '🇦🇺',
@@ -64,9 +64,14 @@ BANK_TAGS = {'fed': '#Fed', 'ecb': '#ECB'}
 BASE_TAGS = ['#Macro', '#Markets', '#Cambotix']
 
 
-def daily_post(brief: dict, platform: str = 'telegram', lang: str | None = None) -> dict:
+def daily_post(brief: dict, platform: str = 'telegram', lang: str | None = None, operations: bool = False) -> dict:
     """The daily brief as a post. `brief` is app.briefs.build_daily's dict - already localized when it is delivered
-    in another language, so no translation happens here."""
+    in another language, so no translation happens here.
+
+    `operations` adds one line of pipeline health, for the operator's own chat only. The operator used to receive
+    the whole brief instead, which Telegram split into four messages and which buried the read under fifteen macro
+    rows, eight headlines and a model name. The full text is still stored and served by GET /briefs/latest.
+    """
     lang = lang or output_language()
     style, L = _style(platform), i18n.labels(lang)
     esc, head = _writers(style)
@@ -98,6 +103,11 @@ def daily_post(brief: dict, platform: str = 'telegram', lang: str | None = None)
     risks = [risk for risk in brief.get('keyRisks') or [] if str(risk).strip()][:POST_RISKS]
     if risks:
         sections['risks'] = [head(L['social_risks'])] + [f'• {esc(outlook.clip(risk, 200))}' for risk in risks]
+    if operations:
+        pipeline = brief.get('pipeline') or {}
+        sections['ops'] = [esc(_tight(L['brief_ops'].format(
+            queued=pipeline.get('queued') or 0, flagged=pipeline.get('flagged24h') or 0,
+            total=pipeline.get('analysesTotal24h') or 0, model=pipeline.get('model') or '?')))]
     sections['credit'] = _credit(brief, material, lang, L, esc)
     sections['tags'] = [' '.join(hashtags(assets=[row['asset'] for row in material],
                                           dimensions=[dim for _, dim, _ in dimensions]))]

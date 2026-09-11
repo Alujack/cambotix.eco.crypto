@@ -79,6 +79,8 @@ EN_LABELS = {
     'social_risks': '⚠️ WHAT WOULD CHANGE THIS',
     'social_horizons': 'Next 4h {now} · 1-5 days {week} · 2-8 weeks {months} · (+ = {meaning})',
     'social_evidence': '📡 Read from {items} items across {sources} sources in the last 24h.',
+    # Operator's chat only: the health of the pipeline that produced the read, in one line rather than a header block.
+    'brief_ops': '⚙ {queued} queued · {flagged}/{total} analyses flagged · {model}',
     'social_track': "🎯 The engine's past calls on {asset}: {hit} of {total} confirmed by the actual price move "
                     '({days}d).',
     'social_stamp': '🕒 {stamp} UTC',
@@ -148,6 +150,7 @@ KM_LABELS = {
     'social_risks': '⚠️ អ្វីដែលអាចផ្លាស់ប្ដូរការវិភាគនេះ',
     'social_horizons': 'ក្នុង 4 ម៉ោង {now} · 1-5 ថ្ងៃ {week} · 2-8 សប្ដាហ៍ {months} · (+ = {meaning})',
     'social_evidence': '📡 អានពី {items} ព័ត៌មាន ពី {sources} ប្រភព ក្នុង 24 ម៉ោងចុងក្រោយ។',
+    'brief_ops': '⚙ រង់ចាំ {queued} · ការវិភាគមានសញ្ញាផ្ទុយ {flagged}/{total} · {model}',
     'social_track': '🎯 ការទាយពីមុនលើ {asset}៖ {hit} ក្នុង {total} ត្រូវបានបញ្ជាក់ដោយចលនាថ្លៃពិត ({days} ថ្ងៃ)។',
     'social_stamp': '🕒 {stamp} UTC',
     'social_breaking': '🚨 ព័ត៌មានបន្ទាន់',
