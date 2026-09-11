@@ -122,3 +122,29 @@ def test_track_record_counts_only_directional_calls_and_withholds_a_thin_rate():
     assert record['XAUUSD'] == {'confirmed': 6, 'rejected': 2, 'flat': 3, 'checks': 8, 'days': 7, 'hitRate': 75}
     assert record['BTC']['hitRate'] is None and record['BTC']['checks'] == 2     # 2 of 2 is not a hit rate
     assert stale == {}                                                           # the measurement window is respected
+
+
+def test_rows_name_a_direction_the_horizons_actually_support():
+    """The 2026-09-10 brief printed "Gold - no clear direction" above +22 / +11 / +4.
+
+    An asset clears MATERIAL on its blended score, but that blend (0.3/0.5/0.2) lands inside bias_label's +/-15
+    NEUTRAL band whenever the move sits in the immediate horizon and decays. The direction has to come from the
+    horizon carrying the move, which is what app.outlook.direction does and what the alert path already used.
+    """
+    gold = {'score': 13, 'macroBias': 'NEUTRAL',       # 22*0.3 + 11*0.5 + 4*0.2 = 12.9
+            'horizons': {'immediate': {'score': 22, 'direction': 'SLIGHT_BULLISH', 'evidence': 1.0},
+                         'short_term': {'score': 11, 'direction': 'NEUTRAL', 'evidence': 1.0},
+                         'medium_term': {'score': 4, 'direction': 'NEUTRAL', 'evidence': 1.0}},
+            'drivers': [{'eventId': 'e1', 'title': 'Trade war escalates', 'importance': 75,
+                         'rationale': 'Haven bid as import prices rise.'}]}
+    row = outlook.rows({'XAUUSD': gold})['material'][0]
+    assert row['direction'] == 'SLIGHT_BULLISH'     # not NEUTRAL: the blend is not what the reader is shown
+    assert row['path'] == 'FADING'                  # and it must not read "no clear direction, fading"
+    assert row['score'] == 13                       # the blended score itself is unchanged
+
+
+def test_rows_still_call_a_genuinely_flat_read_neutral():
+    flat = {'score': 9, 'macroBias': 'NEUTRAL',
+            'horizons': {name: {'score': 9, 'direction': 'NEUTRAL', 'evidence': 1.0} for name in outlook.HORIZONS},
+            'drivers': []}
+    assert outlook.rows({'SPX': flat})['material'][0]['direction'] == 'NEUTRAL'

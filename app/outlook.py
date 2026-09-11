@@ -129,7 +129,10 @@ def rows(assets: dict, record: dict | None = None, limit: int = 6) -> dict:
         drivers = [d for d in (bias.get('drivers') or []) if (d.get('rationale') or '').strip()][:2]
         material.append({
             'asset': asset, 'name': name(asset), 'upMeans': up_means(asset),
-            'score': bias['score'], 'direction': bias['macroBias'],
+            # The horizon carrying the move names the direction, not the blended score: an asset can clear MATERIAL
+            # on a strong immediate read and still blend back inside bias_label's +/-15 NEUTRAL band, which printed
+            # "no clear direction" above three same-signed numbers. `macroBias` stays on the API for the engines.
+            'score': bias['score'], 'direction': direction(horizons),
             'horizons': {h: {'score': horizons[h]['score'], 'direction': horizons[h]['direction']}
                          for h in HORIZONS if h in horizons},
             'path': path(horizons), 'evidence': evidence(horizons.get('short_term', {}).get('evidence', 0.0)),

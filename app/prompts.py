@@ -28,6 +28,11 @@ Rules:
 - subject: for speeches the speaker; for regulatory actions the institution and target; for data prints the metric.
 - Numbers: actual/forecast/previous as plain numbers in the same unit; 3.1% becomes 3.1 with unit "%". If the item
   gives y/y and m/m, prefer the headline figure the article leads with and name it in metric.
+- actual/forecast/previous/metric/unit are ONLY for a reading of a named economic indicator or a policy rate (CPI,
+  PPI, GDP, payrolls, PCE, unemployment, a central-bank rate). They are how the engine measures a surprise against
+  a forecast. Any other number in the item is not an "actual": a deal or fund size, a token or coin count, a market
+  cap, a fine, a transaction volume, a price level, a share move. Leave all five null for those and say what the
+  item is in fact_summary instead. Filling actual with "1375" from "1,375 BTC moved" is an error.
 - surprise only when both actual and forecast are stated; tone only for central-bank communication.
 - is_market_reaction_coverage is true when the item is mainly about the price move ("Bitcoin falls after Fed").
 - importance: 95-100 FOMC/ECB decisions, CPI, NFP, PCE, war escalation with energy impact; 75-94 Fed chair speech,

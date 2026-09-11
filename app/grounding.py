@@ -15,19 +15,52 @@ SAFE_WORDS = {
     'while', 'after', 'before', 'both', 'no', 'not', 'none', 'still', 'so', 'yet', 'data', 'week', 'month', 'session',
     'utc', 'gdp', 'cpi', 'ppi', 'pce', 'nfp', 'etf', 'q1', 'q2', 'q3', 'q4', 'higher', 'lower', 'stagflation',
     'neutral', 'unknown', 'stable', 'rising', 'falling', 'haven', 'equities', 'bonds', 'yields', 'crypto',
+    # Words that name a section or a reading rather than a thing in the world. A model that opens a sentence with
+    # "Upcoming" or "Risks" is labelling, not asserting: withholding the whole narrative over one of these lost the
+    # 2026-09-10 brief its prose ("the model referred to Upcoming, Risks").
+    'upcoming', 'outlook', 'calendar', 'headline', 'headlines', 'development', 'developments', 'source', 'sources',
+    'asset', 'regime', 'macro', 'global', 'sentiment', 'expectations', 'conditions', 'pressure', 'direction',
+    'evidence', 'confidence', 'summary', 'brief', 'across', 'against', 'through', 'between', 'given', 'should',
+    'ahead', 'near', 'above', 'below', 'steady', 'mixed', 'flat', 'firmer', 'softer', 'easing', 'tightening',
+    # Time zones and comparison/unit abbreviations. Capitalised, but they name no institution, country or figure -
+    # the same reason 'utc' is here. A brief was withheld because the model wrote a release time "at 12:30 GMT".
+    'gmt', 'est', 'edt', 'cst', 'cdt', 'pst', 'pdt', 'cet', 'cest', 'bst', 'jst', 'ict', 'aest', 'hkt', 'sgt',
+    'yoy', 'qoq', 'mom', 'bps', 'pct', 'eod', 'ytd',
 }
+
+
+def _is_safe(token: str) -> bool:
+    """SAFE_WORDS plus its regular plurals: "Risks" is as empty a claim as "risk", and listing every plural by hand
+    is how "risk" ended up safe while "Risks" withheld a whole narrative."""
+    word = token.lower().rstrip('.,;:')
+    if word in SAFE_WORDS:
+        return True
+    for suffix, stem in (('ies', 'y'), ('es', ''), ('s', '')):
+        if word.endswith(suffix) and word[:-len(suffix)] + stem in SAFE_WORDS:
+            return True
+    return False
 PROPER_NOUN = re.compile(r'\b([A-Z][A-Za-z&.\-]{1,})\b')
 NUMBER = re.compile(r'-?\d+(?:[.,]\d+)?%?')
 
 
 def _corpus(brief: dict) -> str:
-    parts = [brief.get('riskRegime', ''), brief.get('globalLiquidity', '')]
+    parts = [brief.get('riskRegime', ''), brief.get('globalLiquidity', ''), str(brief.get('date') or '')]
+    # The brief's own header carries its date and generation time, so prose that refers to them is grounded.
+    stamp = brief.get('generatedAt')
+    if stamp is not None:
+        parts.append(f'{stamp:%H:%M %Y-%m-%d}' if hasattr(stamp, 'strftime') else str(stamp))
     for development in brief.get('developments') or []:
         parts += [str(development.get('title', '')), str(development.get('summary', '')),
                   str(development.get('riskRegimeImpact', '')), str(development.get('relationToTrend', ''))]
     for release in brief.get('upcoming') or []:
         parts += [str(release.get('title', '')), str(release.get('currency', '')), str(release.get('forecast') or ''),
                   str(release.get('previous') or '')]
+        # When a release is due is a checkable claim, so it belongs in the ground rather than being exempted from
+        # the check: "CPI lands at 12:30" is then grounded, while an invented "14:00" is still caught. Without this
+        # the calendar's times were nowhere in the corpus and any time at all withheld the narrative.
+        when = release.get('scheduledAt')
+        if when is not None:
+            parts.append(f'{when:%H:%M %Y-%m-%d}' if hasattr(when, 'strftime') else str(when))
     for headline in (brief.get('officialHeadlines') or []) + (brief.get('topHeadlines') or []):
         parts += [str(headline.get('headline', '')), str(headline.get('source', ''))]
     parts += [str(risk) for risk in brief.get('keyRisks') or []]
@@ -61,9 +94,14 @@ def ungrounded_claims(text: str, brief: dict) -> list[str]:
     corpus = _corpus(brief)
     missing = []
     for token in PROPER_NOUN.findall(text):
-        if token.lower() in SAFE_WORDS or len(token) < 3:
+        if len(token) < 3 or _is_safe(token):
             continue
-        if token.lower().rstrip('.,;:') not in corpus:
+        word = token.lower().rstrip('.,;:')
+        # A plural standing on a singular in the data is grounded: the corpus says "tariff", the prose says
+        # "Tariffs". Fabrications ("BOJ", "JGB") have no stem in the corpus either way and are still caught.
+        stems = {word} | {word[:-len(s)] + stem for s, stem in (('ies', 'y'), ('es', ''), ('s', ''))
+                 if word.endswith(s) and len(word) > len(s) + 2}
+        if not any(stem in corpus for stem in stems):
             missing.append(token)
     for number in NUMBER.findall(text):
         if number.strip('%') in {'0', '1', '2', '3', '4', '5', '24', '48'}:

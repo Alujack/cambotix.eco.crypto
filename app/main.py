@@ -161,8 +161,30 @@ def process_reactions():
     return pipeline.run_reactions()
 
 
+def _brief_done(conn, day: date, notify: bool) -> bool:
+    """True when there is nothing left to do for `day`: the brief is built, and delivered if delivery was asked for.
+
+    A missed daily brief used to be silent: n8n writes no execution row for a trigger that never fired, so the only
+    symptom was that no message arrived (2026-09-11, cron '0 6 * * *', no brief and no error anywhere). The hourly
+    watchdog workflow calls this endpoint with if_missing=true, which is a no-op on a normal day. A notification
+    still pending or failed counts as undelivered, so a catch-up re-enqueues it for the outbox.
+    """
+    if conn.execute("SELECT 1 FROM briefs WHERE kind = 'daily' AND brief_date = %s", (day,)).fetchone() is None:
+        return False
+    if not (notify and telegram.configured()):
+        return True          # nothing to deliver, so an existing brief is the whole job
+    row = conn.execute("SELECT status FROM notifications WHERE kind = 'brief' AND ref_id = %s",
+                       (f'daily:{day.isoformat()}',)).fetchone()
+    return row is not None and row['status'] == 'sent'
+
+
 @app.post('/briefs/daily', dependencies=[Depends(authorize)])
-def make_daily_brief(brief_date: date | None = None, notify: bool = True):
+def make_daily_brief(brief_date: date | None = None, notify: bool = True, if_missing: bool = False):
+    if if_missing:
+        day = brief_date or datetime.now(timezone.utc).date()
+        with database() as conn:
+            if _brief_done(conn, day, notify):
+                return {'skipped': 'already delivered' if notify else 'already built', 'date': day.isoformat()}
     use_ai = brief_narrative_enabled() and ai_configured()
     with database() as conn:
         brief = briefs.build_daily(conn, brief_date, use_ai)

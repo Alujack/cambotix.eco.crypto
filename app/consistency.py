@@ -6,6 +6,11 @@ discounted downstream instead of silently trusted. Provider-independent: a stron
 RISK_ASSETS = {'SPX', 'NASDAQ', 'BTC', 'ETH'}
 HAVEN_ASSETS = {'XAUUSD'}
 THRESHOLD = 15  # ignore scores inside the noise band
+# Assets that cannot move the same way with conviction, because one is quoted in the other. EURUSD rising *is* the
+# dollar falling against the euro, and the euro is the largest weight in any broad dollar measure - so "dollar
+# stronger +40" alongside "euro stronger against the dollar +34" is the model contradicting itself, not a nuance.
+# Both scores must clear the noise band before this is called: a flat leg is a non-committal, not a contradiction.
+INVERSE_PAIRS = [('USD', 'EURUSD')]
 
 
 def check(analysis) -> list[dict]:
@@ -25,6 +30,13 @@ def check(analysis) -> list[dict]:
         if regime == 'RISK_OFF' and score < -THRESHOLD:
             flags.append({'code': 'haven_sign', 'asset': asset,
                           'detail': f'risk_regime_impact is RISK_OFF but haven {asset} immediate score is {score:+d}'})
+    for base, quote in INVERSE_PAIRS:
+        if base in impacts and quote in impacts:
+            base_score, quote_score = impacts[base].immediate.score, impacts[quote].immediate.score
+            if min(abs(base_score), abs(quote_score)) > THRESHOLD and (base_score > 0) == (quote_score > 0):
+                flags.append({'code': 'inverse_pair_sign', 'asset': quote,
+                              'detail': f'{base} immediate score is {base_score:+d} and {quote} is {quote_score:+d}, '
+                                        f'but {quote} moves inversely to {base}'})
     # Zero on every horizon is a non-commitment, not a judgement: the analysis listed the asset as affected.
     for asset, impact in sorted(impacts.items()):
         if impact.immediate.score == 0 and impact.short_term.score == 0 and impact.medium_term.score == 0:

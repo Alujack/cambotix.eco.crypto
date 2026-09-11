@@ -42,9 +42,14 @@ def start_engine(env):
     url = f"postgresql://eco:{env['POSTGRES_PASSWORD']}@postgres:5432/{DB}"
     # OUTPUT_LANGUAGE=en keeps the run offline and its assertions deterministic: a Khmer delivery would call out to
     # the translation model. The localized render is covered by tests/test_i18n.py instead.
+    # The scratch database keeps synthetic events out of `eco`, but the compose service loads .env, so without
+    # these the container holds the real bot token and chat id - and POST /briefs/daily notifies by default. That
+    # delivered a mock brief, "Mock provider: no real reasoning performed" included, to the operator's real chat.
+    # Blanking the token makes app.telegram.enqueue a no-op, so the outbox is never even written to.
     container = sh('docker', 'compose', 'run', '-d', '--rm', '--no-deps', '-e', 'AI_PROVIDER=mock', '-e', 'EMBEDDINGS_PROVIDER=none',
-                   '-e', 'OUTPUT_LANGUAGE=en', '-e', f'ECO_DATABASE_URL={url}', '-p', f'127.0.0.1:{PORT}:8000',
-                   'engine').stdout.strip()
+                   '-e', 'OUTPUT_LANGUAGE=en', '-e', f'ECO_DATABASE_URL={url}',
+                   '-e', 'TELEGRAM_BOT_TOKEN=', '-e', 'TELEGRAM_CHAT_ID=', '-e', 'TELEGRAM_CHANNEL_ID=',
+                   '-p', f'127.0.0.1:{PORT}:8000', 'engine').stdout.strip()
     base = f'http://127.0.0.1:{PORT}'
     for _ in range(60):
         try:
@@ -93,7 +98,9 @@ def scenario(base, token):
     assert status == 200 and asset['bias']['score'] < 0, asset
     status, brief = call(base, token, 'POST', '/briefs/daily')
     assert status == 200 and 'GLOBAL MACRO BRIEF' in brief['text'], brief
-    print('daily brief rendered,', len(brief['text'].splitlines()), 'lines')
+    # Asserted, not assumed: a smoke run must never deliver its synthetic brief to a real chat.
+    assert brief['telegram'] == {'skipped': 'not configured'}, brief['telegram']
+    print('daily brief rendered,', len(brief['text'].splitlines()), 'lines (telegram not configured, as required)')
     status, post = call(base, token, 'GET', '/social/daily?platform=facebook')
     assert status == 200 and 'not trading advice' in post['text'] and '#Macro' in post['text'], post
     assert '<' not in post['text'], post

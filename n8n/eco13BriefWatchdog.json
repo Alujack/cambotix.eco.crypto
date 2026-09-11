@@ -1,0 +1,71 @@
+{
+  "id": "eco13BriefWatchdog",
+  "name": "Eco 13 \u2014 Daily brief watchdog",
+  "active": false,
+  "nodes": [
+    {
+      "id": "hourly-catch-up",
+      "name": "Hourly catch-up",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "deliver-brief-if-missing",
+      "name": "Deliver brief if missing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://engine:8000/briefs/daily?if_missing=true",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 400000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ecoEngineAuth",
+          "name": "Eco engine internal API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Hourly catch-up": {
+      "main": [
+        [
+          {
+            "node": "Deliver brief if missing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "tags": []
+}

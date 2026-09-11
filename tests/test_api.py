@@ -1,5 +1,5 @@
 """Database-backed pipeline tests (mock AI). scripts/test.sh provides ECO_DATABASE_URL."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,3 +178,40 @@ def test_health_makes_no_outbound_call(client, monkeypatch):
     assert body['status'] == 'ok' and body['ai']['provider'] == 'ollama' and 'reachable' not in body['ai']
     monkeypatch.setattr(main_module, 'ollama_status', lambda: {'ollama': 'http://x', 'reachable': True, 'missingModels': []})
     assert client.get('/ai/status', headers=HEADERS).json()['reachable'] is True
+
+
+def test_if_missing_builds_the_brief_once_then_skips(client):
+    """The watchdog (Eco 13) catches a daily cron that never fired, so it must be a no-op once the brief is there.
+
+    A missed 06:00 run leaves no n8n execution row and no error, so nothing else would notice.
+    """
+    first = client.post('/briefs/daily?if_missing=true&notify=false', headers=HEADERS).json()
+    assert 'GLOBAL MACRO BRIEF' in first['text']
+    second = client.post('/briefs/daily?if_missing=true&notify=false', headers=HEADERS).json()
+    # With nothing to deliver, an existing brief row is the whole job - otherwise the watchdog would rebuild hourly.
+    assert second == {'skipped': 'already built', 'date': first['date']}
+    # Telegram is unconfigured here, so there is still nothing to deliver and the brief alone settles it.
+    assert client.post('/briefs/daily?if_missing=true', headers=HEADERS).json()['skipped'] == 'already delivered'
+    # Without the flag the endpoint still rebuilds on demand, which is what the 06:00 workflow relies on.
+    assert 'GLOBAL MACRO BRIEF' in client.post('/briefs/daily?notify=false', headers=HEADERS).json()['text']
+
+
+def test_a_built_but_undelivered_brief_is_not_done(client, monkeypatch):
+    """The case the watchdog exists for: the brief row is there but its message never reached Telegram.
+
+    Checked against _brief_done directly - driving it through the endpoint would need a live bot token.
+    """
+    from app import telegram
+    from app.db import database
+    from app.main import _brief_done
+    built = client.post('/briefs/daily?notify=false', headers=HEADERS).json()
+    day = date.fromisoformat(built['date'])
+    monkeypatch.setattr(telegram, 'configured', lambda: True)
+    with database() as conn:
+        assert _brief_done(conn, day, notify=False) is True        # nothing was asked to be delivered
+        assert _brief_done(conn, day, notify=True) is False        # no notification row at all
+        for status, done in (('pending', False), ('failed', False), ('sent', True)):
+            conn.execute('''INSERT INTO notifications (kind, ref_id, text, status) VALUES ('brief', %s, 'x', %s)
+                            ON CONFLICT (kind, ref_id) DO UPDATE SET status = EXCLUDED.status''',
+                         (f'daily:{day.isoformat()}', status))
+            assert _brief_done(conn, day, notify=True) is done, status

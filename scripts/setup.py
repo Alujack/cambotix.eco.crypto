@@ -115,14 +115,15 @@ def node(name, kind, parameters, x, y=0, version=1, **kwargs):
             'typeVersion': version, 'position': [x, y], 'parameters': parameters, **kwargs}
 
 
-def schedule(minutes=None, seconds=None, cron=None):
+def schedule(minutes=None, seconds=None, cron=None, label=None):
     if cron:
         rule = {'interval': [{'field': 'cronExpression', 'expression': cron}]}
     elif seconds:
         rule = {'interval': [{'field': 'seconds', 'secondsInterval': seconds}]}
     else:
         rule = {'interval': [{'field': 'minutes', 'minutesInterval': minutes}]}
-    label = f'Every {seconds} seconds' if seconds else f'Every {minutes} minutes' if minutes else 'Daily 06:00 UTC'
+    label = label or (f'Every {seconds} seconds' if seconds else f'Every {minutes} minutes' if minutes
+                      else 'Daily 06:00 UTC')
     return node(label, 'scheduleTrigger', {'rule': rule}, 0, version=1.2)
 
 
@@ -229,6 +230,13 @@ def build_workflows(registry: dict) -> list[dict]:
             ('eco12TelegramOutbox', 'Eco 12 — Telegram outbox', schedule(seconds=60), '/notify/flush', 60000)):
         nodes = [trig, engine_post('Call engine ' + path, path, 280, timeout=timeout)]
         workflows.append(workflow(identifier, name, nodes, chain(nodes)))
+
+    # A trigger that never fires leaves no execution row, so a missed 06:00 brief was completely silent - on
+    # 2026-09-11 there was no brief, no error and nothing in the n8n log. if_missing=true makes this a no-op on a
+    # normal day and a delivery on a day the daily cron was skipped or its notification never got sent.
+    watch = [schedule(cron='0 * * * *', label='Hourly catch-up'),
+             engine_post('Deliver brief if missing', '/briefs/daily?if_missing=true', 280, timeout=400000)]
+    workflows.append(workflow('eco13BriefWatchdog', 'Eco 13 — Daily brief watchdog', watch, chain(watch)))
     return workflows
 
 
